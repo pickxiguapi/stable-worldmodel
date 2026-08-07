@@ -204,6 +204,7 @@ cython_debug/
 node_modules/
 
 # custom
+data/
 logs/
 .claude/
 .vscode/
