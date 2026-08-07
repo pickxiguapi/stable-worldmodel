@@ -259,6 +259,7 @@ Environments are pulled from the [DeepMind Control Suite](https://github.com/goo
 | GCBC     | Behaviour Cloning |
 | GCIVL    | RL                |
 | GCIQL    | RL                |
+| GCHIQL   | Hierarchical RL   |
 
 </div>
 

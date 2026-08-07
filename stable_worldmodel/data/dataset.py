@@ -661,9 +661,178 @@ class GoalDataset:
         return steps
 
 
+class HierarchicalGoalDataset(GoalDataset):
+    """Add the four goal views required by hierarchical goal-conditioned RL.
+
+    In addition to the value goal produced by :class:`GoalDataset`, each item
+    contains an aligned sequence of low-level goals, one high-level final goal,
+    and an aligned sequence of high-level supervision targets.  For a state at
+    step ``t`` and hierarchy horizon ``k`` these are
+
+    ``low_goal[t] = state[min(t + k, episode_end)]`` and
+    ``high_target[t] = state[min(t + k, high_goal)]`` for trajectory goals.
+    Random high-level goals use the same reachable ``t + k`` target as HIQL.
+
+    The wrapped dataset only needs to expose the history and its one-step
+    successors, i.e. ``num_steps >= current_goal_offset + 1``. Hierarchical
+    goals are loaded directly by episode index and clipped to the episode end,
+    matching OGBench HIQL's terminal handling.
+
+    Args:
+        dataset: Dataset to wrap.
+        actor_goal_probabilities: Sampling probabilities for the high-level
+            final goal in ``(random, geometric_future, uniform_future, current)``
+            order.
+        subgoal_steps: Number of dataset steps in one high-level action.
+        low_goal_keys: Source-to-output mapping for low-level goals.
+        high_goal_keys: Source-to-output mapping for high-level final goals.
+        high_target_keys: Source-to-output mapping for high-level targets.
+        **kwargs: Arguments forwarded to :class:`GoalDataset`; its
+            ``goal_probabilities`` control value-goal sampling.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        actor_goal_probabilities: tuple[float, float, float, float] = (
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+        ),
+        subgoal_steps: int = 25,
+        low_goal_keys: dict[str, str] | None = None,
+        high_goal_keys: dict[str, str] | None = None,
+        high_target_keys: dict[str, str] | None = None,
+        **kwargs,
+    ):
+        super().__init__(dataset=dataset, **kwargs)
+
+        if len(actor_goal_probabilities) != 4:
+            raise ValueError(
+                'actor_goal_probabilities must be a 4-tuple '
+                '(random, geometric_future, uniform_future, current)'
+            )
+        if not np.isclose(sum(actor_goal_probabilities), 1.0):
+            raise ValueError('actor_goal_probabilities must sum to 1.0')
+        if subgoal_steps < 1:
+            raise ValueError('subgoal_steps must be positive')
+        min_num_steps = self.current_goal_offset + 1
+        if dataset.num_steps < min_num_steps:
+            raise ValueError(
+                'dataset.num_steps must be at least current_goal_offset + 1, '
+                f'got {dataset.num_steps} < {min_num_steps}'
+            )
+
+        self.actor_goal_probabilities = actor_goal_probabilities
+        self.subgoal_steps = subgoal_steps
+        self.low_goal_keys = low_goal_keys or {
+            src: f'low_goal_{src}' for src in self.goal_keys
+        }
+        self.high_goal_keys = high_goal_keys or {
+            src: f'high_goal_{src}' for src in self.goal_keys
+        }
+        self.high_target_keys = high_target_keys or {
+            src: f'high_target_{src}' for src in self.goal_keys
+        }
+
+    def _sample_actor_goal_kind(self) -> str:
+        r = self.rng.random()
+        p_random, p_geometric_future, p_uniform_future, _ = (
+            self.actor_goal_probabilities
+        )
+        if r < p_random:
+            return 'random'
+        if r < p_random + p_geometric_future:
+            return 'geometric_future'
+        if r < p_random + p_geometric_future + p_uniform_future:
+            return 'uniform_future'
+        return 'current'
+
+    @staticmethod
+    def _copy_goal_fields(
+        destination: dict,
+        source: dict,
+        key_mapping: dict[str, str],
+    ) -> None:
+        for src_key, dst_key in key_mapping.items():
+            if src_key not in source:
+                continue
+            value = source[src_key]
+            if value.ndim == 0:
+                value = value.unsqueeze(0)
+            destination[dst_key] = value
+
+    def _load_step_sequence(
+        self,
+        ep_idx: int,
+        local_indices: list[int],
+    ) -> dict[str, torch.Tensor]:
+        sequence: dict[str, list[torch.Tensor]] = {}
+        for local_idx in local_indices:
+            step = self._load_single_step(ep_idx, local_idx)
+            for key, value in step.items():
+                if not isinstance(value, torch.Tensor):
+                    continue
+                if value.ndim == 0:
+                    value = value.unsqueeze(0)
+                sequence.setdefault(key, []).append(value)
+        return {
+            key: torch.cat(values, dim=0) for key, values in sequence.items()
+        }
+
+    def __getitem__(self, idx: int):
+        steps = super().__getitem__(idx)
+        ep_idx, local_start = self._get_clip_info(idx)
+        frameskip = self.dataset.frameskip
+        history_size = self.current_goal_offset
+        episode_end = int(self.episode_lengths[ep_idx]) - 1
+
+        state_indices = [
+            local_start + t * frameskip for t in range(history_size)
+        ]
+        low_goal_indices = [
+            min(state_idx + self.subgoal_steps * frameskip, episode_end)
+            for state_idx in state_indices
+        ]
+        low_goals = self._load_step_sequence(ep_idx, low_goal_indices)
+        self._copy_goal_fields(steps, low_goals, self.low_goal_keys)
+
+        goal_kind = self._sample_actor_goal_kind()
+        if goal_kind == 'random':
+            high_goal_ep, high_goal_idx = self._sample_random_step()
+        elif goal_kind == 'geometric_future':
+            high_goal_ep, high_goal_idx = self._sample_geometric_future_step(
+                ep_idx, local_start
+            )
+        elif goal_kind == 'uniform_future':
+            high_goal_ep, high_goal_idx = self._sample_uniform_future_step(
+                ep_idx, local_start
+            )
+        else:
+            high_goal_ep = ep_idx
+            high_goal_idx = local_start + (history_size - 1) * frameskip
+
+        high_goal = self._load_single_step(high_goal_ep, high_goal_idx)
+        self._copy_goal_fields(steps, high_goal, self.high_goal_keys)
+
+        if goal_kind == 'random':
+            high_target_indices = low_goal_indices
+        else:
+            high_target_indices = [
+                min(low_goal_idx, high_goal_idx)
+                for low_goal_idx in low_goal_indices
+            ]
+        high_targets = self._load_step_sequence(ep_idx, high_target_indices)
+        self._copy_goal_fields(steps, high_targets, self.high_target_keys)
+
+        return steps
+
+
 __all__ = [
-    'Dataset',
-    'MergeDataset',
     'ConcatDataset',
+    'Dataset',
     'GoalDataset',
+    'HierarchicalGoalDataset',
+    'MergeDataset',
 ]

@@ -1,0 +1,75 @@
+defaults:
+  - launcher: local
+  - _self_
+
+output_model_name: dinogchiql
+dataset_name: pusht_expert_train.h5
+
+trainer:
+  max_epochs: 100
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+
+batch_size: 128
+num_workers: ${cpus_per_task}
+train_split: 0.9
+train_subset_fraction: 1.0
+seed: 42
+
+image_size: 224
+patch_size: 14
+frameskip: 1
+
+dinowm:
+  history_size: 3
+  td_offset: 1
+  use_proprio_encoder: false
+  proprio_dim: 4
+  proprio_embed_dim: 10
+  action_dim: 2
+
+# The main clip only supplies each history state and its one-step successor.
+# Hierarchical goals are loaded separately and clipped at the episode end.
+n_steps: ${eval:'${dinowm.history_size} + ${dinowm.td_offset}'}
+subgoal_steps: 25
+rep_dim: 10
+
+predictor:
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.0
+  emb_dropout: 0.0
+
+encoder_type: dino
+predictor_lr: 3e-4
+proprio_encoder_lr: 3e-4
+encoder_lr: 3e-4
+
+# HIQL hyperparameters.
+discount: 0.99
+expectile: 0.7
+low_alpha: 3.0
+high_alpha: 3.0
+value_ema_tau: 0.995
+low_actor_rep_grad: false
+gc_negative: true
+
+# (random, geometric_future, uniform_future, current) must sum to 1.
+goal_probabilities:
+  random: 0.3
+  geometric_future: 0.5
+  uniform_future: 0.0
+  current: 0.2
+actor_goal_probabilities:
+  random: 0.0
+  geometric_future: 0.0
+  uniform_future: 1.0
+  current: 0.0
+goal_gamma: 0.99
+
+checkpoint_interval: 3

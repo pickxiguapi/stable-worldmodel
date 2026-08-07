@@ -19,6 +19,7 @@ nav:
   - index.md
   - quick_start.md
   - baselines.md
+  - GCHIQL: gchiql.md
   - Environments:
       - envs/pusht.md
       - envs/dmc.md

@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -190,7 +192,7 @@ class Attention(nn.Module):
         return mask.unsqueeze(0).unsqueeze(0)  # (1, 1, T, T*P)
 
     def forward(self, x, c=None):
-        B, N, C = x.size()
+        B, N, _ = x.size()
         x = self.norm(x)
         if self.att_type == 'cross':
             c = self.norm_c(c)
@@ -616,6 +618,174 @@ class DoublePredictorWrapper(nn.Module):
             Tuple of output tensors from each network.
         """
         return self.net1(*args, **kwargs), self.net2(*args, **kwargs)
+
+
+class GoalRepresentationPredictor(nn.Module):
+    """Predict the state-dependent HIQL representation ``phi(s, g)``.
+
+    State patches are aggregated causally per frame. Goal patches may contain
+    either one shared final goal or one aligned goal per state frame. The
+    representation is length-normalized to radius ``sqrt(rep_dim)`` by default,
+    matching the normalization used by OGBench HIQL.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        rep_dim=10,
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        causal=True,
+        normalize=True,
+        **_,
+    ):
+        super().__init__()
+        self.num_patches = num_patches
+        self.rep_dim = rep_dim
+        self.normalize = normalize
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.state_transformer = SelfAttentionTransformer(
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            num_patches,
+            num_frames,
+            causal=causal,
+        )
+        self.goal_norm = nn.LayerNorm(dim)
+        self.goal_proj = nn.Linear(dim, dim)
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(2 * dim),
+            nn.Linear(2 * dim, mlp_dim),
+            nn.GELU(),
+            nn.Linear(mlp_dim, rep_dim),
+        )
+
+    def _pool_goals(self, goals, num_state_frames):
+        if goals.shape[1] % self.num_patches != 0:
+            raise ValueError(
+                'Goal token count must be divisible by num_patches, got '
+                f'{goals.shape[1]} and {self.num_patches}'
+            )
+        goals = rearrange(
+            goals, 'b (t p) d -> b t p d', p=self.num_patches
+        ).mean(dim=2)
+        goals = self.goal_proj(self.goal_norm(goals))
+        if goals.shape[1] == 1:
+            goals = goals.expand(-1, num_state_frames, -1)
+        elif goals.shape[1] != num_state_frames:
+            raise ValueError(
+                'Expected one shared goal or one goal per state frame, got '
+                f'{goals.shape[1]} goals for {num_state_frames} frames'
+            )
+        return goals
+
+    def forward(self, states, goals):
+        states = states + self.pos_embedding[:, : states.shape[1]]
+        states = self.state_transformer(self.dropout(states))
+        goals = self._pool_goals(goals, states.shape[1])
+        representations = self.out_proj(torch.cat([states, goals], dim=-1))
+        if self.normalize:
+            representations = F.normalize(
+                representations, dim=-1, eps=1e-8
+            ) * math.sqrt(self.rep_dim)
+        return representations
+
+
+class RepresentationPredictor(nn.Module):
+    """Predict per-frame outputs conditioned on an HIQL goal representation."""
+
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        out_dim,
+        rep_dim=10,
+        hidden_dim=256,
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        causal=True,
+        **_,
+    ):
+        super().__init__()
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.state_transformer = SelfAttentionTransformer(
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            num_patches,
+            num_frames,
+            causal=causal,
+        )
+        self.out_proj = nn.Sequential(
+            nn.LayerNorm(dim + rep_dim),
+            nn.Linear(dim + rep_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, out_dim),
+        )
+
+    def forward(self, states, goal_representations):
+        states = states + self.pos_embedding[:, : states.shape[1]]
+        states = self.state_transformer(self.dropout(states))
+        if goal_representations.shape[1] == 1:
+            goal_representations = goal_representations.expand(
+                -1, states.shape[1], -1
+            )
+        if goal_representations.shape[1] != states.shape[1]:
+            raise ValueError(
+                'Expected one representation per state frame, got '
+                f'{goal_representations.shape[1]} for {states.shape[1]}'
+            )
+        return self.out_proj(torch.cat([states, goal_representations], dim=-1))
+
+
+class HierarchicalValuePredictor(nn.Module):
+    """Twin HIQL values sharing a learned state-dependent goal encoder."""
+
+    def __init__(self, *, rep_dim=10, **predictor_kwargs):
+        super().__init__()
+        self.goal_representation = GoalRepresentationPredictor(
+            rep_dim=rep_dim,
+            **predictor_kwargs,
+        )
+        self.values = DoublePredictorWrapper(
+            RepresentationPredictor,
+            rep_dim=rep_dim,
+            out_dim=1,
+            **predictor_kwargs,
+        )
+
+    def encode_goal(self, states, goals):
+        return self.goal_representation(states, goals)
+
+    def forward(self, states, goals):
+        goal_representations = self.encode_goal(states, goals)
+        return self.values(states, goal_representations)
 
 
 class ExpectileLoss(nn.Module):
