@@ -206,6 +206,7 @@ node_modules/
 # custom
 data/
 logs/
+runs/
 .claude/
 .vscode/
 **/.mypy_cache/**
