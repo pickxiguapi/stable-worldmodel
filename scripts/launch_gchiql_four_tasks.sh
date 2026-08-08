@@ -25,8 +25,8 @@ for i in "${!tasks[@]}"; do
     dinowm.td_offset=1 \
     dinowm.use_proprio_encoder=false \
     "dinowm.action_dim=${action_dims[$i]}" \
-    frameskip=5 \
-    goal_gamma=0.95099 \
+    frameskip=1 \
+    goal_gamma=0.99 \
     seed=42 \
     wandb.enabled=true \
     wandb.config.entity=xiguapi \
