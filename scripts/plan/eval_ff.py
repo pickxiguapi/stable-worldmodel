@@ -20,6 +20,49 @@ from torchvision.transforms import v2 as transforms
 import stable_worldmodel as swm
 
 
+def load_feedforward_model(name: str):
+    """Load an exported policy, including legacy GCIVL/GCIQL exports.
+
+    Early GCIVL/GCIQL runs saved the full training config next to the policy
+    state dict instead of a Hydra-instantiable model config.  Reconstruct the
+    actor from that training config so those checkpoints remain evaluable.
+    """
+    checkpoint_root = swm.data.utils.get_cache_dir(sub_folder='checkpoints')
+    checkpoint_path = checkpoint_root / name
+    config_path = checkpoint_path.parent / 'config.json'
+
+    if not checkpoint_path.is_file() or not config_path.is_file():
+        return swm.wm.utils.load_pretrained(name)
+
+    cfg = OmegaConf.load(config_path)
+    if cfg.get('_target_') is not None:
+        return swm.wm.utils.load_pretrained(name)
+
+    run_name = checkpoint_path.parent.name
+    if run_name.startswith('gcivl_'):
+        from scripts.train.gcivl import (
+            get_ivl_actor_model,
+            get_ivl_value_model,
+        )
+
+        value_module = get_ivl_value_model(cfg)
+        actor_module = get_ivl_actor_model(cfg, value_module)
+    elif run_name.startswith('gciql_'):
+        from scripts.train.gciql import (
+            get_gciql_actor_model,
+            get_gciql_critics_model,
+        )
+
+        critics_module = get_gciql_critics_model(cfg)
+        actor_module = get_gciql_actor_model(cfg, critics_module)
+    else:
+        return swm.wm.utils.load_pretrained(name)
+
+    state_dict = torch.load(checkpoint_path, map_location='cpu')
+    actor_module.model.load_state_dict(state_dict)
+    return actor_module.model
+
+
 def img_transform():
     transform = transforms.Compose(
         [
@@ -98,7 +141,7 @@ def run(cfg: DictConfig):
     policy = cfg.get('policy', 'random')
 
     if policy != 'random':
-        model = swm.wm.utils.load_pretrained(cfg.policy)
+        model = load_feedforward_model(cfg.policy)
         model = model.to('cuda')
         model = model.eval()
         model.requires_grad_(False)
@@ -156,17 +199,18 @@ def run(cfg: DictConfig):
 
     world.set_policy(policy)
 
+    results_path.mkdir(parents=True, exist_ok=True)
     start_time = time.time()
-    metrics = world.evaluate_from_dataset(
-        dataset,
+    metrics = world.evaluate(
+        dataset=dataset,
         start_steps=eval_start_idx.tolist(),
-        goal_offset_steps=cfg.eval.goal_offset_steps,
+        goal_offset=cfg.eval.goal_offset_steps,
         eval_budget=cfg.eval.eval_budget,
         episodes_idx=eval_episodes.tolist(),
         callables=OmegaConf.to_container(
             cfg.eval.get('callables'), resolve=True
         ),
-        video_path=results_path,
+        video=results_path,
     )
     end_time = time.time()
 
