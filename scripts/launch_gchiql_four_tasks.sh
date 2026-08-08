@@ -26,6 +26,7 @@ for i in "${!tasks[@]}"; do
     dinowm.use_proprio_encoder=false \
     "dinowm.action_dim=${action_dims[$i]}" \
     frameskip=1 \
+    low_actor_rep_grad=true \
     goal_gamma=0.99 \
     seed=42 \
     wandb.enabled=true \

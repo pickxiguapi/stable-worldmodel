@@ -1,0 +1,35 @@
+# GCHIQL-Chunk: hierarchical latent planning plus low-level Q-Chunking.
+#
+# The low-level critic consumes the complete action chunk and uses a k-step
+# backup.  The low-level actor uses exp(alpha * (Q_L - V_L)); the high-level
+# actor retains GCHIQL's waypoint value-difference objective.
+
+defaults:
+  - gchiql
+  - _self_
+
+output_model_name: dinogchiql_chunk
+
+# One dataset step is one k-action chunk.  With k=5, history observations are
+# five raw environment frames apart and each policy output has 5 * action_dim
+# entries.
+frameskip: 5
+
+# HierarchicalGoalDataset measures this in sampled (chunk) steps.  Therefore
+# 10 chunk steps correspond to a planning horizon of 50 raw environment steps.
+subgoal_steps: 10
+
+# GoalDataset also samples in chunk steps.  This preserves the physical
+# geometric-goal distribution of gamma=0.99 at raw-frame resolution.
+goal_gamma: 0.95099
+
+# Discount is specified per raw environment frame.  Training applies
+# discount ** (frameskip * td_offset) to chunk bootstraps.
+discount: 0.99
+
+# HiQC uses the negative sparse reward assumed by the chunk reward sum.
+gc_negative: true
+
+# Crucial for pixel-based HIQL: allow the low-level actor objective to update
+# the shared latent subgoal representation.
+low_actor_rep_grad: true

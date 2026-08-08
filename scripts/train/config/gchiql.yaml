@@ -56,7 +56,9 @@ expectile: 0.7
 low_alpha: 3.0
 high_alpha: 3.0
 value_ema_tau: 0.995
-low_actor_rep_grad: false
+# Pixel observations need the low-level actor loss to maintain the learned
+# subgoal representation (matching the OGBench HIQL recommendation).
+low_actor_rep_grad: true
 gc_negative: true
 
 # (random, geometric_future, uniform_future, current) must sum to 1.

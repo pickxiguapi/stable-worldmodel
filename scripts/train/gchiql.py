@@ -147,22 +147,36 @@ def _gaussian_nll(target, mean, log_stds):
     )
 
 
-def _goal_reward_and_mask(batch, history_size, gc_negative=True):
+def _goal_reward_and_mask(
+    batch,
+    history_size,
+    gc_negative=True,
+    goal_prefix='',
+):
     """Compute the goal-reaching reward from exact raw-observation equality."""
     obs_pixels = batch['pixels'][:, :history_size]
-    goal_pixels = repeat(
-        batch['goal_pixels'],
-        'b 1 c h w -> b t c h w',
-        t=history_size,
-    )
+    goal_pixels = batch[f'{goal_prefix}goal_pixels']
+    if goal_pixels.shape[1] == 1:
+        goal_pixels = repeat(
+            goal_pixels,
+            'b 1 c h w -> b t c h w',
+            t=history_size,
+        )
+    elif goal_pixels.shape[1] != history_size:
+        raise ValueError(
+            f'{goal_prefix}goal_pixels must have one or {history_size} '
+            f'frames, got {goal_pixels.shape[1]}'
+        )
     matches = (obs_pixels == goal_pixels).all(dim=(2, 3, 4))
     if 'proprio' in batch:
         obs_proprio = batch['proprio'][:, :history_size]
-        goal_proprio = repeat(
-            batch['goal_proprio'],
-            'b 1 d -> b t d',
-            t=history_size,
-        )
+        goal_proprio = batch[f'{goal_prefix}goal_proprio']
+        if goal_proprio.shape[1] == 1:
+            goal_proprio = repeat(
+                goal_proprio,
+                'b 1 d -> b t d',
+                t=history_size,
+            )
         matches = matches & (obs_proprio == goal_proprio).all(dim=2)
     successes = matches.float().unsqueeze(-1)
     masks = 1.0 - successes
@@ -170,15 +184,28 @@ def _goal_reward_and_mask(batch, history_size, gc_negative=True):
     return rewards, masks
 
 
+def get_chunk_td_constants(cfg):
+    """Return the raw-frame discount and sparse-reward sum for one chunk."""
+    gamma = cfg.get('discount', 0.99)
+    span = cfg.frameskip * cfg.dinowm.td_offset
+    gamma_span = gamma**span
+    reward_lump = (1.0 - gamma_span) / (1.0 - gamma)
+    return gamma_span, reward_lump
+
+
 # ============================================================================
 # Model Architecture and Objective
 # ============================================================================
-def get_gchiql_model(cfg):
+def get_gchiql_model(cfg, chunked=False):
     """Build the joint GCHIQL value, high-actor, and low-actor model."""
     expectile_loss = swm.wm.gcrl.ExpectileLoss(tau=cfg.get('expectile', 0.7))
     gamma = cfg.get('discount', 0.99)
     history_size = cfg.dinowm.history_size
     td_offset = cfg.dinowm.td_offset
+    if chunked:
+        gamma, reward_lump = get_chunk_td_constants(cfg)
+        if not cfg.get('gc_negative', True):
+            raise ValueError('GCHIQL-Chunk requires gc_negative=true')
 
     def encode_view(self, batch, pixels_key, target, prefix):
         return self.model.encode(
@@ -250,6 +277,8 @@ def get_gchiql_model(cfg):
             history_size,
             gc_negative=cfg.get('gc_negative', True),
         )
+        if chunked:
+            rewards = -masks * reward_lump
 
         # HIQL value objective. The teacher advantage selects the expectile
         # side, while each online head regresses to its own teacher TD target.
@@ -278,17 +307,95 @@ def get_gchiql_model(cfg):
         value_loss2 = expectile_loss(v2, q2_target, value_advantage)
         value_loss = value_loss1 + value_loss2
 
-        # Both actors are extracted from the same learned value function.
+        target_actions = batch['action'][:, :history_size]
+        critic_loss = torch.zeros((), device=embedding.device)
+        low_value_loss = torch.zeros((), device=embedding.device)
+
+        if chunked:
+            # HiQC Eq. 6-7.  The low-level value is the expectile of the
+            # chunk-conditioned critic, whose TD target skips the full action
+            # chunk.  The shared HIQL value representation keeps the critic
+            # and low-level policy conditioned on the same latent subgoal.
+            low_rewards, low_masks = _goal_reward_and_mask(
+                batch,
+                history_size,
+                gc_negative=True,
+                goal_prefix='low_',
+            )
+            low_rewards = -low_masks * reward_lump
+            with torch.no_grad():
+                low_goal_reps_target = (
+                    self.model.value_predictor.teacher.encode_goal(
+                        embedding_flat, low_goal_embedding_flat
+                    )
+                )
+                low_q_target = self.model.critic_predictor.forward_teacher(
+                    embedding_flat,
+                    target_actions,
+                    low_goal_reps_target,
+                )
+                low_v1_target, low_v2_target = (
+                    self.model.value_predictor.forward_teacher(
+                        embedding_flat, low_goal_embedding_flat
+                    )
+                )
+                low_value_advantage = low_q_target - 0.5 * (
+                    low_v1_target + low_v2_target
+                )
+                next_low_v1_target, next_low_v2_target = (
+                    self.model.value_predictor.forward_teacher(
+                        next_embedding_flat, low_goal_embedding_flat
+                    )
+                )
+                low_q_td_target = (
+                    low_rewards
+                    + gamma
+                    * low_masks
+                    * torch.minimum(next_low_v1_target, next_low_v2_target)
+                )
+
+            low_v1, low_v2 = self.model.value_predictor.forward_student(
+                embedding_flat, low_goal_embedding_flat
+            )
+            low_value_loss = expectile_loss(
+                low_v1, low_q_target, low_value_advantage
+            ) + expectile_loss(low_v2, low_q_target, low_value_advantage)
+            low_goal_reps_for_q = (
+                self.model.value_predictor.student.encode_goal(
+                    embedding_flat, low_goal_embedding_flat
+                )
+            )
+            low_q_pred = self.model.critic_predictor.forward_student(
+                embedding_flat,
+                target_actions,
+                low_goal_reps_for_q.detach(),
+            )
+            critic_loss = (low_q_pred - low_q_td_target).pow(2).mean()
+            value_loss = value_loss + low_value_loss
+
+        # The high-level actor remains value-difference weighted (HiQC Eq. 5).
+        # Only the low-level actor switches to the chunk Q-V advantage.
         with torch.no_grad():
             low_v1, low_v2 = self.model.value_predictor.forward_student(
                 embedding_flat, low_goal_embedding_flat
             )
-            low_next_v1, low_next_v2 = (
-                self.model.value_predictor.forward_student(
-                    next_embedding_flat, low_goal_embedding_flat
+            if chunked:
+                low_goal_reps = self.model.value_predictor.student.encode_goal(
+                    embedding_flat, low_goal_embedding_flat
                 )
-            )
-            low_advantage = 0.5 * (low_next_v1 + low_next_v2 - low_v1 - low_v2)
+                low_q = self.model.critic_predictor.forward_student(
+                    embedding_flat, target_actions, low_goal_reps
+                )
+                low_advantage = low_q - 0.5 * (low_v1 + low_v2)
+            else:
+                low_next_v1, low_next_v2 = (
+                    self.model.value_predictor.forward_student(
+                        next_embedding_flat, low_goal_embedding_flat
+                    )
+                )
+                low_advantage = 0.5 * (
+                    low_next_v1 + low_next_v2 - low_v1 - low_v2
+                )
 
             high_v1, high_v2 = self.model.value_predictor.forward_student(
                 embedding_flat, high_goal_embedding_flat
@@ -327,7 +434,6 @@ def get_gchiql_model(cfg):
             self.model.log_std_min,
             self.model.log_std_max,
         )
-        target_actions = batch['action'][:, :history_size]
         low_nll = _gaussian_nll(target_actions, low_means, low_log_stds)
         low_weights = torch.exp(
             cfg.get('low_alpha', 3.0) * low_advantage
@@ -348,8 +454,13 @@ def get_gchiql_model(cfg):
         ).clamp(max=100.0)
         high_actor_loss = (high_weights * high_nll).mean()
 
-        total_loss = value_loss + low_actor_loss + high_actor_loss
+        total_loss = (
+            value_loss + critic_loss + low_actor_loss + high_actor_loss
+        )
         batch['value_loss'] = value_loss
+        if chunked:
+            batch['low_value_loss'] = low_value_loss
+            batch['critic_loss'] = critic_loss
         batch['low_actor_loss'] = low_actor_loss
         batch['high_actor_loss'] = high_actor_loss
         batch['loss'] = total_loss
@@ -358,6 +469,8 @@ def get_gchiql_model(cfg):
         diagnostics = {
             f'{prefix}loss': total_loss.detach(),
             f'{prefix}value_loss': value_loss.detach(),
+            f'{prefix}low_value_loss': low_value_loss.detach(),
+            f'{prefix}critic_loss': critic_loss.detach(),
             f'{prefix}low_actor_loss': low_actor_loss.detach(),
             f'{prefix}high_actor_loss': high_actor_loss.detach(),
             f'{prefix}value_mean': (0.5 * (v1 + v2)).mean().detach(),
@@ -433,6 +546,19 @@ def get_gchiql_model(cfg):
         normalize=False,
         **predictor_kwargs,
     )
+    wrapped_critic_predictor = None
+    if chunked:
+        critic_predictor = swm.wm.gcrl.RepresentationQPredictor(
+            action_dim=effective_action_dim,
+            rep_dim=cfg.rep_dim,
+            **predictor_kwargs,
+        )
+        wrapped_critic_predictor = spt.TeacherStudentWrapper(
+            critic_predictor,
+            warm_init=True,
+            base_ema_coefficient=cfg.get('value_ema_tau', 0.995),
+            final_ema_coefficient=cfg.get('value_ema_tau', 0.995),
+        )
 
     wrapped_encoder = (
         spt.backbone.EvalOnly(encoder) if not encoder_trainable else encoder
@@ -442,6 +568,7 @@ def get_gchiql_model(cfg):
         low_action_predictor=low_action_predictor,
         high_action_predictor=high_action_predictor,
         value_predictor=wrapped_value_predictor,
+        critic_predictor=wrapped_critic_predictor,
         extra_encoders=extra_encoders,
         history_size=history_size,
     )
@@ -463,6 +590,10 @@ def get_gchiql_model(cfg):
             'model.high_action_predictor', cfg.predictor_lr
         ),
     }
+    if chunked:
+        optim_config['critic_predictor_opt'] = add_opt(
+            'model.critic_predictor', cfg.predictor_lr
+        )
     if extra_encoders is not None:
         optim_config['proprio_opt'] = add_opt(
             'model.extra_encoders.proprio', cfg.proprio_encoder_lr
@@ -472,6 +603,11 @@ def get_gchiql_model(cfg):
             'model.encoder', cfg.get('encoder_lr', 3e-4)
         )
     return spt.Module(model=model, forward=forward, optim=optim_config)
+
+
+def get_gchiql_chunk_model(cfg):
+    """Build GCHIQL with the HiQC low-level Q-chunking objective."""
+    return get_gchiql_model(cfg, chunked=True)
 
 
 # ============================================================================

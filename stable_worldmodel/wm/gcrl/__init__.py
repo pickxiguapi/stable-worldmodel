@@ -9,6 +9,7 @@ from .module import (
     Predictor,
     QPredictor,
     RepresentationPredictor,
+    RepresentationQPredictor,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     'Predictor',
     'QPredictor',
     'RepresentationPredictor',
+    'RepresentationQPredictor',
 ]

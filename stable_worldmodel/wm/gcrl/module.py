@@ -764,6 +764,78 @@ class RepresentationPredictor(nn.Module):
         return self.out_proj(torch.cat([states, goal_representations], dim=-1))
 
 
+class RepresentationQPredictor(nn.Module):
+    """Predict Q-values from states, latent goals, and full action chunks.
+
+    This is the low-level critic used by hierarchical Q-chunking.  Unlike
+    :class:`QPredictor`, the goal input is already represented in the HIQL
+    latent space, so the critic is conditioned on the same subgoal consumed
+    by the low-level policy.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_patches,
+        num_frames,
+        dim,
+        depth,
+        heads,
+        mlp_dim,
+        action_dim,
+        rep_dim=10,
+        hidden_dim=256,
+        dim_head=64,
+        dropout=0.0,
+        emb_dropout=0.0,
+        causal=True,
+        **_,
+    ):
+        super().__init__()
+        self.pos_embedding = nn.Parameter(
+            torch.randn(1, num_frames * num_patches, dim)
+        )
+        self.dropout = nn.Dropout(emb_dropout)
+        self.state_transformer = SelfAttentionTransformer(
+            dim,
+            depth,
+            heads,
+            dim_head,
+            mlp_dim,
+            dropout,
+            num_patches,
+            num_frames,
+            causal=causal,
+        )
+        self.q_head = nn.Sequential(
+            nn.LayerNorm(dim + rep_dim + action_dim),
+            nn.Linear(dim + rep_dim + action_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(self, states, actions, goal_representations):
+        states = states + self.pos_embedding[:, : states.shape[1]]
+        states = self.state_transformer(self.dropout(states))
+        if goal_representations.shape[1] == 1:
+            goal_representations = goal_representations.expand(
+                -1, states.shape[1], -1
+            )
+        if goal_representations.shape[1] != states.shape[1]:
+            raise ValueError(
+                'Expected one representation per state frame, got '
+                f'{goal_representations.shape[1]} for {states.shape[1]}'
+            )
+        if actions.shape[:2] != states.shape[:2]:
+            raise ValueError(
+                'Expected one action chunk per state frame, got '
+                f'{tuple(actions.shape[:2])} for {tuple(states.shape[:2])}'
+            )
+        return self.q_head(
+            torch.cat([states, goal_representations, actions], dim=-1)
+        )
+
+
 class HierarchicalValuePredictor(nn.Module):
     """Twin HIQL values sharing a learned state-dependent goal encoder."""
 

@@ -132,8 +132,9 @@ w^\ell_t\log\pi^\ell
 $$
 
 `low_actor_rep_grad` controls whether this loss may update $\phi$. It defaults
-to `false`, matching OGBench's state-based default. The value loss always
-updates $\phi$.
+to `true` here because this implementation is pixel-based; OGBench identifies
+this gradient path as crucial for maintaining useful visual subgoal
+representations. The value loss always updates $\phi$.
 
 ## High-level actor
 

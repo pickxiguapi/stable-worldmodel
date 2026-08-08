@@ -4,15 +4,16 @@
 # This file is meant to be sourced, not executed directly.
 
 launch_four_usage() {
+  local expected_gpu_count="${LAUNCH_GPU_COUNT:-4}"
   cat <<EOF
 Usage: bash scripts/$(basename "$0") [options]
 
 Options:
-  --datasets-dir DIR  Directory containing the four .h5 datasets
+  --datasets-dir DIR  Directory containing the required .h5 datasets
   --runs-dir DIR      Root directory for checkpoints/runs
   --logs-dir DIR      Root directory for logs (default: <repo>/logs)
   --venv-dir DIR      Virtual environment directory (default: <repo>/.venv)
-  --gpus LIST         Four comma-separated GPU IDs (for example: 0,1,2,3)
+  --gpus LIST         ${expected_gpu_count} comma-separated GPU IDs
   --dry-run           Validate inputs and print commands without starting tmux
   -h, --help          Show this help
 
@@ -24,6 +25,7 @@ EOF
 
 launch_four_init() {
   local repo_default_gpus="$1"
+  local expected_gpu_count="${LAUNCH_GPU_COUNT:-4}"
   shift
 
   REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[1]}")/.." && pwd)"
@@ -88,13 +90,23 @@ launch_four_init() {
   done
 
   IFS=',' read -r -a GPU_IDS <<< "$GPUS"
-  if [[ ${#GPU_IDS[@]} -ne 4 ]] || [[ -z "${GPU_IDS[0]}" || -z "${GPU_IDS[1]}" || -z "${GPU_IDS[2]}" || -z "${GPU_IDS[3]}" ]]; then
-    echo "ERROR: --gpus/GPUS must contain exactly four comma-separated GPU IDs; got: ${GPUS}" >&2
+  if [[ ${#GPU_IDS[@]} -ne $expected_gpu_count ]]; then
+    echo "ERROR: --gpus/GPUS must contain exactly ${expected_gpu_count} comma-separated GPU IDs; got: ${GPUS}" >&2
     return 2
   fi
+  local gpu_id
+  for gpu_id in "${GPU_IDS[@]}"; do
+    if [[ -z "$gpu_id" ]]; then
+      echo "ERROR: --gpus/GPUS contains an empty GPU ID: ${GPUS}" >&2
+      return 2
+    fi
+  done
 
   local filename
   local required_datasets=(tworoom.h5 reacher.h5 pusht_expert_train.h5 cube_single_expert.h5)
+  if declare -p LAUNCH_REQUIRED_DATASETS >/dev/null 2>&1; then
+    required_datasets=("${LAUNCH_REQUIRED_DATASETS[@]}")
+  fi
   case "$ONLY_TASK" in
     '') ;;
     tworoom) required_datasets=(tworoom.h5) ;;
@@ -157,13 +169,14 @@ launch_four_run() {
 
 launch_four_summary() {
   local experiment="$1"
+  local launch_count="${LAUNCH_GPU_COUNT:-4}"
   if [[ "$DRY_RUN" == 1 ]]; then
     echo "Dry run completed for ${experiment}; no tmux sessions were started."
   else
     if [[ -n "$ONLY_TASK" ]]; then
       echo "Started ${experiment}/${ONLY_TASK} on its configured GPU."
     else
-      echo "Started four ${experiment} runs on GPUs ${GPUS}."
+      echo "Started ${launch_count} ${experiment} runs on GPUs ${GPUS}."
     fi
   fi
   echo "Datasets: ${DATASETS_DIR}"
