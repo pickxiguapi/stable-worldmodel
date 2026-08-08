@@ -14,10 +14,10 @@ for i in "${!tasks[@]}"; do
   task="${tasks[$i]}"
   launch_four_run "gciql-${task}" "${GPU_IDS[$i]}" gciql "$task" scripts/train/gciql.py \
     "dataset_name=${DATASETS_DIR}/${datasets[$i]}" \
-    "output_model_name=gciql_${task}_vit_tiny_bs256_e10" \
+    "output_model_name=gciql_${task}_vit_tiny_bs128_e10" \
     "+subdir=${task}" \
     trainer.max_epochs=10 \
-    batch_size=256 \
+    batch_size=128 \
     num_workers=8 \
     train_subset_fraction=1.0 \
     encoder_type=vit_tiny \
