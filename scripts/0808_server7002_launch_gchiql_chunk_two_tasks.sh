@@ -6,7 +6,7 @@ DATASETS_DIR="${DATASETS_DIR:-/mnt/18T/yyf/stablewm-data/datasets}"
 OUTPUT_DIR="${OUTPUT_DIR:-/mnt/18T/yyf/stablewm-data/runs}"
 RUNS_DIR="${RUNS_DIR:-${OUTPUT_DIR}}"
 LOGS_DIR="${LOGS_DIR:-${OUTPUT_DIR}}"
-VENV_DIR="${VENV_DIR:-/home/yyf/yyf/stable-worldmodel}"
+VENV_DIR="${VENV_DIR:-/home/yyf/yyf/stable-worldmodel/.venv}"
 
 # This server runs only the two pixel manipulation tasks.
 tasks=(pusht ogbench_cube)
