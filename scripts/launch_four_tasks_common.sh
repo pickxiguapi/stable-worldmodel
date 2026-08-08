@@ -150,8 +150,16 @@ launch_four_run() {
     mkdir -p "$run_dir" "$log_dir"
   fi
 
-  local command
-  printf -v command 'CUDA_VISIBLE_DEVICES=%q STABLEWM_HOME=%q SPT_CACHE_DIR=%q PYTHONPATH=%q %q %q ' \
+  local command=''
+  local proxy_var proxy_value
+  for proxy_var in http_proxy https_proxy all_proxy no_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY; do
+    proxy_value="${!proxy_var:-}"
+    if [[ -n "$proxy_value" ]]; then
+      printf -v command '%s%s=%q ' "$command" "$proxy_var" "$proxy_value"
+    fi
+  done
+  printf -v command '%sCUDA_VISIBLE_DEVICES=%q STABLEWM_HOME=%q SPT_CACHE_DIR=%q PYTHONPATH=%q %q %q ' \
+    "$command" \
     "$gpu_id" "$run_dir" "$run_dir" "$REPO_ROOT" "$PYTHON_BIN" "$train_script"
 
   local argument
