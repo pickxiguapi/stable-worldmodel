@@ -832,17 +832,17 @@ def get_gciql_actor_model(cfg, trained_critics_model):
 # Training Setup
 # ============================================================================
 def setup_pl_logger(cfg, postfix=''):
-    if not cfg.wandb.enable:
+    if not cfg.wandb.enabled:
         return None
 
-    wandb_run_id = cfg.wandb.get('run_id', None)
+    wandb_run_id = cfg.wandb.config.get('id', None)
     wandb_logger = WandbLogger(
         name=f'dino_gciql_chunk{postfix}',
-        project=cfg.wandb.project,
-        entity=cfg.wandb.entity,
+        project=cfg.wandb.config.project,
+        entity=cfg.wandb.config.entity,
         resume='allow' if wandb_run_id else None,
         id=wandb_run_id,
-        log_model=False,
+        log_model=cfg.wandb.config.get('log_model', False),
     )
 
     wandb_logger.log_hyperparams(OmegaConf.to_container(cfg))
