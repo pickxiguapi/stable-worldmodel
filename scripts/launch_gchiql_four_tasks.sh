@@ -14,13 +14,13 @@ for i in "${!tasks[@]}"; do
   task="${tasks[$i]}"
   launch_four_run "gchiql-${task}" "${GPU_IDS[$i]}" gchiql "$task" scripts/train/gchiql.py \
     "dataset_name=${DATASETS_DIR}/${datasets[$i]}" \
-    "output_model_name=gchiql_${task}_dino_bs256_e10" \
+    "output_model_name=gchiql_${task}_vit_tiny_bs256_e10" \
     "+subdir=${task}" \
     trainer.max_epochs=10 \
     batch_size=256 \
     num_workers=8 \
     train_subset_fraction=1.0 \
-    encoder_type=dino \
+    encoder_type=vit_tiny \
     dinowm.history_size=3 \
     dinowm.td_offset=1 \
     dinowm.use_proprio_encoder=false \
