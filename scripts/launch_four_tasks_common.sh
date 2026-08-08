@@ -145,9 +145,10 @@ launch_four_run() {
 
   local run_dir="${RUNS_DIR}/${experiment}/${task}"
   local log_dir="${LOGS_DIR}/${experiment}/${task}"
+  local tmp_dir="${run_dir}/tmp"
   local train_log="${log_dir}/train.log"
   if [[ "$DRY_RUN" != 1 ]]; then
-    mkdir -p "$run_dir" "$log_dir"
+    mkdir -p "$run_dir" "$log_dir" "$tmp_dir"
   fi
 
   local command=''
@@ -156,9 +157,9 @@ launch_four_run() {
     proxy_value="${!proxy_var:-}"
     printf -v command '%s%s=%q ' "$command" "$proxy_var" "$proxy_value"
   done
-  printf -v command '%sCUDA_VISIBLE_DEVICES=%q STABLEWM_HOME=%q SPT_CACHE_DIR=%q PYTHONPATH=%q %q %q ' \
+  printf -v command '%sTMPDIR=%q CUDA_VISIBLE_DEVICES=%q STABLEWM_HOME=%q SPT_CACHE_DIR=%q PYTHONPATH=%q %q %q ' \
     "$command" \
-    "$gpu_id" "$run_dir" "$run_dir" "$REPO_ROOT" "$PYTHON_BIN" "$train_script"
+    "$tmp_dir" "$gpu_id" "$run_dir" "$run_dir" "$REPO_ROOT" "$PYTHON_BIN" "$train_script"
 
   local argument
   for argument in "$@"; do
