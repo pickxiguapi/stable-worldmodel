@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=launch_four_tasks_common.sh
 source "${SCRIPT_DIR}/launch_four_tasks_common.sh"
 launch_four_init "4,5,6,7" "$@"
+RUN_TAG="${RUN_TAG:-$(date +%Y%m%d_%H%M%S)}"
 
 tasks=(tworoom reacher pusht ogbench_cube)
 datasets=(tworoom.h5 reacher.h5 pusht_expert_train.h5 cube_single_expert.h5)
@@ -15,10 +16,11 @@ for i in "${!tasks[@]}"; do
   if [[ -n "$ONLY_TASK" && "$task" != "$ONLY_TASK" ]]; then
     continue
   fi
+  run_id="gciql_chunk_${task}_dino_bs256_s42_${RUN_TAG}"
   launch_four_run "gciql-chunk-${task}" "${GPU_IDS[$i]}" gciql_chunk "$task" scripts/train/gciql_chunk.py \
     "dataset_name=${DATASETS_DIR}/${datasets[$i]}" \
     "output_model_name=gciql_chunk_${task}_dino_bs256_e10" \
-    "+subdir=${task}" \
+    "+subdir=${run_id}" \
     trainer.max_epochs=10 \
     batch_size=256 \
     num_workers=8 \
