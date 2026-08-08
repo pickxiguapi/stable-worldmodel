@@ -1,0 +1,94 @@
+# GCIQL-Chunk: flat Q-Chunking value learning with frameskip=5.
+#
+# Reference: HiQC (arXiv:2607.20834) low-level Q-Chunking design (Eq. 3, 6-8),
+# WITHOUT the hierarchical planner and WITHOUT the flow-matching policy.
+# - The critic is conditioned on the full action chunk: Q(s, a_chunk, g).
+# - The value target is the k-step backup: Q <- R_chunk + gamma^span * V(s'),
+#   with span = frameskip * td_offset (see get_chunk_td_constants in
+#   gciql_chunk.py).
+# - The actor uses the chunk-conditioned advantage exp((Q - V)/alpha) (Eq. 8).
+
+defaults:
+  - launcher: local
+  - _self_
+
+
+output_model_name: dinoiql_chunk
+dataset_name: pusht_expert_train.h5
+
+trainer:
+  max_epochs: 100
+  strategy: auto #ddp
+  devices: 1
+  accelerator: gpu
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+
+batch_size: 256
+num_workers: ${cpus_per_task}
+train_split: 0.9
+train_subset_fraction: 1.0  # Fraction of training set to use (e.g. 0.1 for 10%)
+seed: 42
+
+image_size: 224
+patch_size: 14
+
+n_steps: ${eval:'${dinowm.td_offset} + ${dinowm.history_size}'}
+# Chunk size: each sampled "step" spans `frameskip` raw frames and the actor
+# predicts a `frameskip`-length action chunk. k=5 is the sweet spot in HiQC's
+# sensitivity analysis (performance improves from k=1 to k=5, k>10 degrades
+# due to compounding open-loop errors).
+frameskip: 5
+
+dinowm:
+  history_size: 3
+  td_offset: 1  # number of chunks ahead for the k-step value backup
+  use_proprio_encoder: false  # Set to false to disable proprioception encoder
+  proprio_dim: 4
+  proprio_embed_dim: 10
+  action_dim: 2
+  action_embed_dim: 10
+
+predictor:
+  depth: 6
+  heads: 16
+  mlp_dim: 2048
+  dim_head: 64
+  dropout: 0.0
+  emb_dropout: 0.0
+
+# Encoder configuration
+# Options: 'dino' (pretrained frozen DINO) or 'vit_tiny' (trainable ViT tiny from scratch)
+encoder_type: dino
+
+train_value: true
+
+predictor_lr: 3e-4
+proprio_encoder_lr: 3e-4
+action_encoder_lr: 3e-4
+encoder_lr: 3e-4
+
+# IQL hyperparameters
+discount: 0.99  # Discount factor (gamma) PER RAW FRAME; the code applies
+                # gamma^(frameskip*td_offset) inside the k-step backup.
+expectile: 0.9  # Expectile tau for asymmetric value loss
+awr_alpha: 3.0  # AWR temperature for the Q-V chunk advantage (HiQC low-level αL=3.0)
+value_ema_tau: 0.995  # EMA coefficient for target value network updates
+
+# Goal sampling probabilities (random, geometric_future, uniform_future, current) - must sum to 1.0
+goal_probabilities:
+  random: 0.3 #0.3
+  geometric_future: 0.5
+  uniform_future: 0.0
+  current: 0.2
+actor_goal_probabilities:
+  random: 0.5
+  geometric_future: 0.0
+  uniform_future: 0.5
+  current: 0.0
+# GoalDataset samples future goals in CHUNK units (k chunks ahead). To keep the
+# same physical goal-distance distribution as frameskip=1 with gamma=0.99,
+# use gamma ** frameskip = 0.99**5 ≈ 0.95099.
+goal_gamma: 0.95099
+
+dump_object: True
