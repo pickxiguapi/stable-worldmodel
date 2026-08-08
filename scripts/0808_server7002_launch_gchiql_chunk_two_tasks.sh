@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DATASETS_DIR="${DATASETS_DIR:-/mnt/18T/yyf/stablewm-data/datasets/}"
+DATASETS_DIR="${DATASETS_DIR:-/mnt/18T/yyf/stablewm-data/datasets}"
 OUTPUT_DIR="${OUTPUT_DIR:-/mnt/18T/yyf/stablewm-data/runs}"
 RUNS_DIR="${RUNS_DIR:-${OUTPUT_DIR}}"
 LOGS_DIR="${LOGS_DIR:-${OUTPUT_DIR}}"
