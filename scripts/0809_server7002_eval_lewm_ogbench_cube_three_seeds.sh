@@ -5,6 +5,8 @@ REPO_DIR="${REPO_DIR:-/home/yyf/yyf/stable-worldmodel}"
 PYTHON_BIN="${PYTHON_BIN:-${REPO_DIR}/.venv/bin/python}"
 UV_BIN="${UV_BIN:-/home/yyf/.local/bin/uv}"
 DATA_ROOT="${DATA_ROOT:-/mnt/18T/yyf/stablewm-data}"
+OGBENCH_WHEEL="${OGBENCH_WHEEL:-${DATA_ROOT}/packages/ogbench-1.2.1-py3-none-any.whl}"
+OGBENCH_WHEEL_SHA256=597ac2207935e4edc46de5d5742e940a753f2329e18612e9cfe7f9e857435f83
 DATASET="${DATASET:-${DATA_ROOT}/datasets/cube_single_expert.h5}"
 CHECKPOINT="${CHECKPOINT:-${DATA_ROOT}/checkpoints/lewm_ogbench_cube/weights_epoch_10.pt}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-${DATA_ROOT}/evals/lewm_ogbench_cube_epoch10}"
@@ -23,8 +25,13 @@ command -v tmux >/dev/null 2>&1 || { echo "ERROR: tmux is not installed." >&2; e
 
 if ! "${PYTHON_BIN}" -c 'import ogbench' >/dev/null 2>&1; then
   [[ -x "${UV_BIN}" ]] || { echo "ERROR: uv executable not found: ${UV_BIN}" >&2; exit 1; }
+  [[ -s "${OGBENCH_WHEEL}" ]] || { echo "ERROR: Offline OGBench wheel not found: ${OGBENCH_WHEEL}" >&2; exit 1; }
+  echo "${OGBENCH_WHEEL_SHA256}  ${OGBENCH_WHEEL}" | sha256sum --check --status || {
+    echo "ERROR: OGBench wheel checksum mismatch: ${OGBENCH_WHEEL}" >&2
+    exit 1
+  }
   echo "Installing locked OGBench evaluation dependency into ${PYTHON_BIN}."
-  "${UV_BIN}" pip install --python "${PYTHON_BIN}" 'ogbench==1.2.1'
+  "${UV_BIN}" pip install --python "${PYTHON_BIN}" --no-deps "${OGBENCH_WHEEL}"
 fi
 "${PYTHON_BIN}" -c 'import ogbench'
 
