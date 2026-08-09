@@ -11,6 +11,7 @@ SEED="${SEED:-777}"
 NUM_EVAL="${NUM_EVAL:-50}"
 GOAL_OFFSET_STEPS="${GOAL_OFFSET_STEPS:-25}"
 EVAL_BUDGET="${EVAL_BUDGET:-50}"
+OUTPUT_FILENAME="${OUTPUT_FILENAME:-gciql_chunk_tworoom_offset${GOAL_OFFSET_STEPS}_budget${EVAL_BUDGET}_seed${SEED}_results.txt}"
 
 [[ -f "${POLICY_PATH}" ]] || { echo "Missing policy: ${POLICY_PATH}" >&2; exit 1; }
 [[ -f "${DATASET_PATH}" ]] || { echo "Missing dataset: ${DATASET_PATH}" >&2; exit 1; }
@@ -31,5 +32,5 @@ exec "${REPO_ROOT}/.venv/bin/python" scripts/plan/eval_chunk.py \
   "eval.num_eval=${NUM_EVAL}" \
   "eval.goal_offset_steps=${GOAL_OFFSET_STEPS}" \
   "eval.eval_budget=${EVAL_BUDGET}" \
-  "output.filename=gciql_chunk_tworoom_seed${SEED}_results.txt" \
+  "output.filename=${OUTPUT_FILENAME}" \
   "seed=${SEED}"
