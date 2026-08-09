@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/home/yyf/yyf/stable-worldmodel}"
 PYTHON_BIN="${PYTHON_BIN:-${REPO_DIR}/.venv/bin/python}"
+UV_BIN="${UV_BIN:-/home/yyf/.local/bin/uv}"
 DATA_ROOT="${DATA_ROOT:-/mnt/18T/yyf/stablewm-data}"
 DATASET="${DATASET:-${DATA_ROOT}/datasets/cube_single_expert.h5}"
 CHECKPOINT="${CHECKPOINT:-${DATA_ROOT}/checkpoints/lewm_ogbench_cube/weights_epoch_10.pt}"
@@ -19,6 +20,13 @@ gpus=(0 1 2)
   exit 1
 }
 command -v tmux >/dev/null 2>&1 || { echo "ERROR: tmux is not installed." >&2; exit 1; }
+
+if ! "${PYTHON_BIN}" -c 'import ogbench' >/dev/null 2>&1; then
+  [[ -x "${UV_BIN}" ]] || { echo "ERROR: uv executable not found: ${UV_BIN}" >&2; exit 1; }
+  echo "Installing locked OGBench evaluation dependency into ${PYTHON_BIN}."
+  "${UV_BIN}" pip install --python "${PYTHON_BIN}" 'ogbench==1.2.1'
+fi
+"${PYTHON_BIN}" -c 'import ogbench'
 
 for seed in "${seeds[@]}"; do
   session="eval-lewm-ogbench-cube-e10-seed${seed}"
