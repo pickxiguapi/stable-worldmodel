@@ -331,6 +331,169 @@ class FeedForwardPolicy(BasePolicy):
         return action
 
 
+class ChunkedFeedForwardPolicy(FeedForwardPolicy):
+    """Execute flattened action chunks predicted by a feed-forward model.
+
+    The model is queried only when an environment's action queue is empty.
+    At each query, the policy supplies up to ``history_len`` real observation
+    frames sampled at chunk boundaries and splits the model's flattened
+    ``action_block * action_dim`` output into raw environment actions.
+    """
+
+    def __init__(
+        self,
+        model: Actionable,
+        action_block: int,
+        history_len: int = 1,
+        process: dict[str, Transformable] | None = None,
+        transform: dict[str, Callable[[torch.Tensor], torch.Tensor]]
+        | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if action_block < 1:
+            raise ValueError('action_block must be at least 1')
+        if history_len < 1:
+            raise ValueError('history_len must be at least 1')
+        super().__init__(
+            model=model, process=process, transform=transform, **kwargs
+        )
+        self.type = 'chunked_feed_forward'
+        self.action_block = int(action_block)
+        self.history_len = int(history_len)
+        self._frame_histories: list[deque[np.ndarray]] | None = None
+        self._action_queues: list[deque[np.ndarray]] | None = None
+
+    def set_env(self, env: Any) -> None:
+        super().set_env(env)
+        self._frame_histories = None
+        self._action_queues = None
+
+    @staticmethod
+    def _latest_frame(value: np.ndarray) -> np.ndarray:
+        value = np.asarray(value)
+        if value.ndim == 5:
+            return value[:, -1]
+        if value.ndim == 4:
+            return value
+        raise ValueError(
+            'Expected batched pixels shaped (B,T,H,W,C) or (B,H,W,C), '
+            f'got {value.shape}'
+        )
+
+    @staticmethod
+    def _latest_goal(value: np.ndarray) -> np.ndarray:
+        value = np.asarray(value)
+        if value.ndim == 5:
+            return value[:, -1:]
+        if value.ndim == 4:
+            return value[:, None]
+        raise ValueError(
+            'Expected batched goals shaped (B,T,H,W,C) or (B,H,W,C), '
+            f'got {value.shape}'
+        )
+
+    def _ensure_batch_state(self, batch_size: int) -> None:
+        if (
+            self._frame_histories is not None
+            and len(self._frame_histories) == batch_size
+        ):
+            return
+        self._frame_histories = [
+            deque(maxlen=self.history_len) for _ in range(batch_size)
+        ]
+        self._action_queues = [deque() for _ in range(batch_size)]
+
+    def _raw_action_dim(self) -> int:
+        scaler = self.process.get('action')
+        if scaler is not None and hasattr(scaler, 'n_features_in_'):
+            return int(scaler.n_features_in_)
+        if self.env is None or not hasattr(self.env, 'action_space'):
+            raise ValueError('Cannot infer raw action dimension.')
+        return int(self.env.action_space.shape[-1])
+
+    def _predict_chunks(
+        self,
+        indices: list[int],
+        goals: np.ndarray,
+    ) -> np.ndarray:
+        assert self._frame_histories is not None
+        histories = np.stack(
+            [np.stack(self._frame_histories[i], axis=0) for i in indices],
+            axis=0,
+        )
+        model_info = self._prepare_info(
+            {'pixels': histories, 'goal': goals[indices]}
+        )
+        model_info['goal_pixels'] = model_info['goal']
+
+        device = next(self.model.parameters()).device
+        for key, value in model_info.items():
+            if torch.is_tensor(value):
+                model_info[key] = value.to(device)
+
+        with torch.no_grad():
+            chunks = self.model.get_action(model_info)
+        if torch.is_tensor(chunks):
+            chunks = chunks.detach().cpu().numpy()
+        chunks = np.asarray(chunks)
+
+        action_dim = self._raw_action_dim()
+        expected = self.action_block * action_dim
+        if chunks.ndim != 2 or chunks.shape[-1] != expected:
+            raise ValueError(
+                f'Model returned action shape {chunks.shape}; expected '
+                f'(B, {expected}) for {self.action_block}x{action_dim} chunks.'
+            )
+        chunks = chunks.reshape(len(indices), self.action_block, action_dim)
+        if 'action' in self.process:
+            flat = chunks.reshape(-1, action_dim)
+            flat = self.process['action'].inverse_transform(flat)
+            chunks = flat.reshape(len(indices), self.action_block, action_dim)
+        return chunks
+
+    def get_action(self, info_dict: dict, **kwargs: Any) -> np.ndarray:
+        assert self.env is not None, 'Environment not set for the policy'
+        assert 'goal' in info_dict, "'goal' must be provided in info_dict"
+
+        frames = self._latest_frame(info_dict['pixels'])
+        goals = self._latest_goal(info_dict['goal'])
+        batch_size = len(frames)
+        self._ensure_batch_state(batch_size)
+        assert self._frame_histories is not None
+        assert self._action_queues is not None
+
+        flush = info_dict.get('_needs_flush')
+        if flush is not None:
+            flush = np.asarray(flush, dtype=bool).reshape(-1)
+            if len(flush) == batch_size:
+                for index in np.flatnonzero(flush):
+                    self._frame_histories[index].clear()
+                    self._action_queues[index].clear()
+
+        pending = [
+            index
+            for index, queue in enumerate(self._action_queues)
+            if not queue
+        ]
+        for index in pending:
+            self._frame_histories[index].append(frames[index].copy())
+
+        # Group environments by real history length. This keeps warm-up
+        # histories unpadded while still batching environments that reset at
+        # different times.
+        by_length: dict[int, list[int]] = {}
+        for index in pending:
+            length = len(self._frame_histories[index])
+            by_length.setdefault(length, []).append(index)
+
+        for indices in by_length.values():
+            chunks = self._predict_chunks(indices, goals)
+            for row, index in enumerate(indices):
+                self._action_queues[index].extend(chunks[row])
+
+        return np.stack([queue.popleft() for queue in self._action_queues])
+
+
 class WorldModelPolicy(BasePolicy):
     """Policy using a world model and planning solver for action selection."""
 

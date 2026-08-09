@@ -9,6 +9,7 @@ from gymnasium import spaces as gym_spaces
 
 from stable_worldmodel.policy import (
     BasePolicy,
+    ChunkedFeedForwardPolicy,
     ExpertPolicy,
     FeedForwardPolicy,
     PlanConfig,
@@ -122,6 +123,63 @@ def test_random_policy_set_seed():
     mock_env = MagicMock()
     policy.set_env(mock_env)
     mock_env.action_space.seed.assert_called_once_with(123)
+
+
+class _ChunkModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.anchor = torch.nn.Parameter(torch.zeros(()))
+        self.calls = []
+
+    def get_action(self, info):
+        self.calls.append(info['pixels'].shape)
+        batch_size = info['pixels'].shape[0]
+        chunk = torch.arange(6, dtype=torch.float32).repeat(batch_size, 1)
+        return chunk.to(self.anchor.device)
+
+
+class _ActionScaler:
+    n_features_in_ = 2
+
+    def inverse_transform(self, value):
+        return value + 10.0
+
+
+def test_chunked_feedforward_policy_executes_and_replans_chunks():
+    model = _ChunkModel()
+    policy = ChunkedFeedForwardPolicy(
+        model=model,
+        action_block=3,
+        history_len=2,
+        process={'action': _ActionScaler()},
+    )
+    env = MagicMock()
+    env.action_space = gym_spaces.Box(-1, 1, shape=(2, 2))
+    policy.set_env(env)
+    info = {
+        'pixels': np.zeros((2, 1, 4, 4, 3), dtype=np.uint8),
+        'goal': np.zeros((2, 1, 4, 4, 3), dtype=np.uint8),
+    }
+
+    np.testing.assert_array_equal(policy.get_action(info), [[10, 11], [10, 11]])
+    np.testing.assert_array_equal(policy.get_action(info), [[12, 13], [12, 13]])
+    np.testing.assert_array_equal(policy.get_action(info), [[14, 15], [14, 15]])
+    assert model.calls == [(2, 1, 4, 4, 3)]
+
+    policy.get_action(info)
+    assert model.calls[-1] == (2, 2, 4, 4, 3)
+
+
+@pytest.mark.parametrize('action_block,history_len', [(0, 1), (1, 0)])
+def test_chunked_feedforward_policy_rejects_invalid_sizes(
+    action_block, history_len
+):
+    with pytest.raises(ValueError):
+        ChunkedFeedForwardPolicy(
+            model=_ChunkModel(),
+            action_block=action_block,
+            history_len=history_len,
+        )
 
 
 def test_random_policy_set_env_no_seed_skips_seeding():
