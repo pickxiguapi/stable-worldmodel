@@ -1,0 +1,73 @@
+defaults:
+  - launcher: local
+  - _self_
+
+output_model_name: qchiql_chunk_new
+dataset_name: tworoom.h5
+subdir: ${hydra:job.id}
+
+trainer:
+  max_epochs: 10
+  strategy: auto
+  devices: 1
+  accelerator: gpu
+  precision: bf16-mixed
+  gradient_clip_val: 1.0
+
+batch_size: 192
+num_workers: ${cpus_per_task}
+train_split: 0.9
+train_subset_fraction: 1.0
+seed: 42
+
+image_size: 224
+patch_size: 14
+encoder_type: vit_tiny
+
+# One dataset step contains a complete k=5 action chunk.
+frameskip: 5
+dinowm:
+  history_size: 3
+  td_offset: 1
+  use_proprio_encoder: false
+  action_dim: 2
+
+n_steps: ${eval:'${dinowm.history_size} + ${dinowm.td_offset}'}
+# HiQC defines c in raw environment steps.  Because the dataset is sampled
+# every k=frameskip steps, high_target advances c/k sampled transitions.
+subgoal_horizon: 10
+subgoal_steps: ${eval:'${subgoal_horizon} // ${frameskip}'}
+rep_dim: 10
+
+# OGBench defaults: compact layer-normalized MLP control heads.
+network:
+  hidden_dims: [512, 512, 512]
+  rep_hidden_dims: [512, 512, 512]
+
+lr: 3e-4
+
+# OGBench HIQL/GCIQL target update and HiQC loss hyperparameters.
+tau: 0.005
+discount: 0.99
+expectile: 0.5
+# Match Stable-WM GCIQL/GCHIQL: AWR weights are exp(alpha * advantage).
+# The original HiQC Eq. 8 uses flow matching; this variant uses Gaussian AWR.
+low_alpha: 3.0
+high_alpha: 3.0
+low_actor_rep_grad: true
+gc_negative: true
+
+goal_probabilities:
+  random: 0.3
+  geometric_future: 0.5
+  uniform_future: 0.0
+  current: 0.2
+actor_goal_probabilities:
+  random: 0.0
+  geometric_future: 0.0
+  uniform_future: 1.0
+  current: 0.0
+
+# gamma^5 preserves the raw-frame geometric goal distribution.
+goal_gamma: 0.95099
+checkpoint_interval: 3

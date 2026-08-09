@@ -11,6 +11,7 @@ from .module import (
     RepresentationPredictor,
     RepresentationQPredictor,
 )
+from .qchiql_chunk_new import QCHIQLChunkNew
 
 __all__ = [
     'GCHIQL',
@@ -21,6 +22,7 @@ __all__ = [
     'GoalRepresentationPredictor',
     'HierarchicalValuePredictor',
     'Predictor',
+    'QCHIQLChunkNew',
     'QPredictor',
     'RepresentationPredictor',
     'RepresentationQPredictor',
