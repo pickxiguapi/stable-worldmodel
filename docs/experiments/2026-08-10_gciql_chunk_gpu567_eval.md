@@ -7,7 +7,7 @@ Training checkpoint: epoch 10
 ## Evaluation protocol
 
 - 50 evaluation episodes
-- seed 777
+- seed 777 and an independent repeat with seed 42
 - goal offset 25 environment steps
 - evaluation budget 50 actions
 - DINO visual encoder
@@ -21,16 +21,22 @@ is executed open-loop before the next policy query.
 
 ## Results
 
-| Task | Successes | Success rate | Evaluation time |
-|---|---:|---:|---:|
-| Reacher | 0 / 50 | 0% | 46.83 s |
-| PushT | 0 / 50 | 0% | 28.85 s |
-| OGBench Cube | 46 / 50 | 92% | 61.62 s |
+| Task | Seed | Successes | Success rate | Evaluation time |
+|---|---:|---:|---:|---:|
+| Reacher | 777 | 0 / 50 | 0% | 46.83 s |
+| Reacher | 42 | 1 / 50 | 2% | 47.00 s |
+| PushT | 777 | 0 / 50 | 0% | 28.85 s |
+| PushT | 42 | 0 / 50 | 0% | 25.10 s |
+| OGBench Cube | 777 | 46 / 50 | 92% | 61.62 s |
+| OGBench Cube | 42 | 48 / 50 | 96% | 59.50 s |
 
-All three evaluations exited with status 0. The evaluator reconstructed each
+All evaluations exited with status 0. The evaluator reconstructed each
 checkpoint as `action_block=5` and `history_len=3`; these numbers are therefore
-policy outcomes rather than process failures. The zero scores on Reacher and
-PushT should be treated as anomalous model results and investigated separately.
+policy outcomes rather than process failures. Repeating Reacher and PushT with
+an independent seed confirmed the result: pooled across 100 episodes, Reacher
+achieved 1% and PushT achieved 0%. These checkpoints should be treated as
+failed or near-failed policies and investigated separately. OGBench Cube was
+stable across seeds, achieving 94% pooled success over 100 episodes.
 
 ## Checkpoints and raw results
 
@@ -42,9 +48,17 @@ All paths below are on Yingbo Cloud.
 | PushT | `/root/data/yyf/stable-worldmodel/runs/gciql_chunk/pusht/checkpoints/gciql_chunk_pusht_dino_bs256_e10_policy/weights_epoch_10.pt` | `/root/data/yyf/stable-worldmodel/runs/gciql_chunk/pusht/checkpoints/gciql_chunk_pusht_dino_bs256_e10_policy/gciql_chunk_pusht_offset25_budget50_seed777_results.txt` |
 | OGBench Cube | `/root/data/yyf/stable-worldmodel/runs/gciql_chunk/ogbench_cube/checkpoints/gciql_chunk_ogbench_cube_dino_bs256_e10_policy/weights_epoch_10.pt` | `/root/data/yyf/stable-worldmodel/runs/gciql_chunk/ogbench_cube/checkpoints/gciql_chunk_ogbench_cube_dino_bs256_e10_policy/gciql_chunk_ogbench_cube_offset25_budget50_seed777_results.txt` |
 
+The seed-42 rerun results are stored next to the corresponding checkpoints as
+`gciql_chunk_reacher_offset25_budget50_seed42_results.txt`,
+`gciql_chunk_pusht_offset25_budget50_seed42_results.txt`, and
+`gciql_chunk_ogbench_cube_offset25_budget50_seed42_results.txt`.
+
 Launcher logs, exit statuses, and the manifest are stored under:
 
 `/root/data/yyf/stable-worldmodel/runs/gciql_chunk/eval_gpu567_20260810/`
+
+Logs and exit statuses are separated into `seed_777/` and `seed_42/`
+subdirectories for the rerun tasks.
 
 Videos are stored next to each policy checkpoint.
 

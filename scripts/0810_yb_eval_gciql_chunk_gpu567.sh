@@ -30,7 +30,7 @@ run_worker() {
   local run_root="${REPO_ROOT}/runs/gciql_chunk/${name}"
   local policy="${run_root}/checkpoints/${policy_dirs[$index]}/weights_epoch_10.pt"
   local dataset="${REPO_ROOT}/datasets/${datasets[$index]}"
-  local run_dir="${OUTPUT_ROOT}/${name}"
+  local run_dir="${OUTPUT_ROOT}/${name}/seed_${SEED}"
   local output_filename="gciql_chunk_${name}_offset${GOAL_OFFSET_STEPS}_budget${EVAL_BUDGET}_seed${SEED}_results.txt"
   local status
 
