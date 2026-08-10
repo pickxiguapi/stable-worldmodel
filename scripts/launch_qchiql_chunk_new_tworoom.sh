@@ -21,15 +21,14 @@ launch_four_run "qchiql-chunk-new-tworoom" "${GPU_IDS[0]}" qchiql_chunk_new twor
   "batch_size=${BATCH_SIZE}" \
   num_workers=8 \
   train_subset_fraction=1.0 \
-  encoder_type=vit_tiny \
+  encoder=vit_tiny \
   dinowm.history_size=3 \
   dinowm.td_offset=1 \
   dinowm.use_proprio_encoder=false \
   dinowm.action_dim=2 \
   frameskip=5 \
-  subgoal_horizon=10 \
+  subgoal_steps=10 \
   low_actor_rep_grad=true \
-  goal_gamma=0.95099 \
   seed=42 \
   wandb.enabled=true \
   wandb.config.entity=xiguapi \

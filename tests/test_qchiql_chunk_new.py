@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 from torch import nn
 
 from stable_worldmodel.wm.gcrl import QCHIQLChunkNew
-from stable_worldmodel.wm.gcrl.qchiql_chunk_new import MLP
+from stable_worldmodel.wm.gcrl.qchiql_chunk_new import MLP, ActorMLP
 
 
 class DummyViT(nn.Module):
@@ -27,8 +27,9 @@ def _small_model():
         feature_dim=8,
         action_dim=6,
         rep_dim=4,
-        hidden_dims=(16, 16),
-        rep_hidden_dims=(16,),
+        value_hidden_dims=(16, 16),
+        actor_hidden_dims=(16, 16),
+        goal_rep_hidden_dims=(16,),
     )
 
 
@@ -40,6 +41,38 @@ def test_qchiql_control_heads_stay_float32_under_mixed_precision():
         outputs = model(inputs)
 
     assert outputs.dtype == torch.float32
+
+
+def test_qchiql_mlp_initialization_matches_ogbench():
+    model = MLP(32, 4, hidden_dims=(64, 64), layer_norm=True)
+    linears = [module for module in model.modules() if isinstance(module, nn.Linear)]
+    norms = [module for module in model.modules() if isinstance(module, nn.LayerNorm)]
+
+    assert all(torch.count_nonzero(layer.bias) == 0 for layer in linears)
+    assert all(norm.eps == 1e-6 for norm in norms)
+
+    actor = ActorMLP(512, 10, hidden_dims=(512, 512, 512))
+    expected_std = 0.1 * (2.0 / (512 + 10)) ** 0.5
+    assert actor.output.weight.std().item() == pytest.approx(
+        expected_std,
+        rel=0.15,
+    )
+    assert torch.count_nonzero(actor.output.bias) == 0
+
+
+def test_qchiql_initial_goal_representations_are_not_constant():
+    torch.manual_seed(0)
+    model = _small_model()
+    states = model.encode_high(torch.randn(64, 1, 3, 16, 16))
+    goals = model.encode_high(torch.randn(64, 1, 3, 16, 16))
+    representations = model.represent_goal(states, goals)
+
+    feature_std = representations.std(dim=0, unbiased=False).mean()
+    pair_distance = (representations[1:] - representations[:-1]).norm(
+        dim=-1
+    ).mean()
+    assert feature_std > 1e-3
+    assert pair_distance > 1e-2
 
 
 def test_qchiql_has_separate_high_low_encoders_and_frozen_targets():
@@ -187,10 +220,11 @@ def test_qchiql_training_objective_is_finite():
             'tau': 0.005,
             'image_size': 28,
             'patch_size': 14,
-            'encoder_type': 'vit_tiny',
+            'encoder': 'vit_tiny',
+            'const_std': True,
+            'discrete': False,
             'rep_dim': 4,
-            'subgoal_horizon': 4,
-            'subgoal_steps': 2,
+            'subgoal_steps': 4,
             'n_steps': 3,
             'lr': 3e-4,
             'dinowm': {
@@ -199,10 +233,9 @@ def test_qchiql_training_objective_is_finite():
                 'use_proprio_encoder': False,
                 'action_dim': 3,
             },
-            'network': {
-                'hidden_dims': [32, 32],
-                'rep_hidden_dims': [32],
-            },
+            'actor_hidden_dims': [32, 32],
+            'value_hidden_dims': [32, 32],
+            'layer_norm': True,
         }
     )
     module = get_qchiql_chunk_new_model(cfg)
@@ -333,8 +366,7 @@ def test_qchiql_rejects_misaligned_temporal_config():
     cfg = OmegaConf.create(
         {
             'frameskip': 5,
-            'subgoal_horizon': 12,
-            'subgoal_steps': 2,
+            'subgoal_steps': 12,
             'n_steps': 4,
             'gc_negative': True,
             'dinowm': {'history_size': 3, 'td_offset': 1},
@@ -342,3 +374,60 @@ def test_qchiql_rejects_misaligned_temporal_config():
     )
     with pytest.raises(ValueError, match='positive multiple of frameskip'):
         get_qchiql_chunk_new_model(cfg)
+
+
+def test_qchiql_uses_ogbench_goal_parameter_names():
+    from scripts.train.qchiql_chunk_new import (
+        _get_subgoal_steps,
+        _goal_probabilities,
+    )
+
+    cfg = OmegaConf.create(
+        {
+            'frameskip': 5,
+            'subgoal_steps': 10,
+            'value_p_curgoal': 0.2,
+            'value_p_trajgoal': 0.5,
+            'value_p_randomgoal': 0.3,
+            'value_geom_sample': True,
+            'actor_p_curgoal': 0.0,
+            'actor_p_trajgoal': 1.0,
+            'actor_p_randomgoal': 0.0,
+            'actor_geom_sample': False,
+        }
+    )
+
+    assert _get_subgoal_steps(cfg) == (10, 2)
+    assert _goal_probabilities(cfg, 'value') == (0.3, 0.5, 0.0, 0.2)
+    assert _goal_probabilities(cfg, 'actor') == (0.0, 0.0, 1.0, 0.0)
+
+
+def test_qchiql_keeps_legacy_checkpoint_config_compatibility():
+    from scripts.train.qchiql_chunk_new import (
+        _get_subgoal_steps,
+        _goal_probabilities,
+    )
+
+    cfg = OmegaConf.create(
+        {
+            'frameskip': 5,
+            'subgoal_horizon': 10,
+            'subgoal_steps': 2,
+            'goal_probabilities': {
+                'random': 0.3,
+                'geometric_future': 0.5,
+                'uniform_future': 0.0,
+                'current': 0.2,
+            },
+            'actor_goal_probabilities': {
+                'random': 0.0,
+                'geometric_future': 0.0,
+                'uniform_future': 1.0,
+                'current': 0.0,
+            },
+        }
+    )
+
+    assert _get_subgoal_steps(cfg) == (10, 2)
+    assert _goal_probabilities(cfg, 'value') == (0.3, 0.5, 0.0, 0.2)
+    assert _goal_probabilities(cfg, 'actor') == (0.0, 0.0, 1.0, 0.0)

@@ -30,11 +30,16 @@ class MLP(nn.Module):
         dims = (input_dim, *hidden_dims)
         layers = []
         for in_dim, out_dim in pairwise(dims):
-            layers.append(nn.Linear(in_dim, out_dim))
+            linear = nn.Linear(in_dim, out_dim)
+            nn.init.xavier_uniform_(linear.weight)
+            nn.init.zeros_(linear.bias)
+            layers.append(linear)
             layers.append(nn.GELU())
             if layer_norm:
-                layers.append(nn.LayerNorm(out_dim))
+                layers.append(nn.LayerNorm(out_dim, eps=1e-6))
         self.output = nn.Linear(dims[-1], output_dim)
+        nn.init.xavier_uniform_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
         layers.append(self.output)
         self.net = nn.Sequential(*layers)
 
@@ -50,10 +55,16 @@ class MLP(nn.Module):
 class TwinMLP(nn.Module):
     """Two independently initialized MLP estimates, as used by OGBench."""
 
-    def __init__(self, input_dim, output_dim, hidden_dims=(512, 512, 512)):
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        hidden_dims=(512, 512, 512),
+        layer_norm=True,
+    ):
         super().__init__()
-        self.net1 = MLP(input_dim, output_dim, hidden_dims)
-        self.net2 = MLP(input_dim, output_dim, hidden_dims)
+        self.net1 = MLP(input_dim, output_dim, hidden_dims, layer_norm)
+        self.net2 = MLP(input_dim, output_dim, hidden_dims, layer_norm)
 
     def forward(self, inputs):
         return self.net1(inputs), self.net2(inputs)
@@ -69,7 +80,9 @@ class ActorMLP(MLP):
             hidden_dims,
             layer_norm=False,
         )
-        nn.init.xavier_uniform_(self.output.weight, gain=0.01)
+        # Flax variance_scaling(scale=1e-2, mode='fan_avg') corresponds to
+        # Xavier uniform with sqrt(1e-2)=0.1 applied as the gain.
+        nn.init.xavier_uniform_(self.output.weight, gain=0.1)
         nn.init.zeros_(self.output.bias)
 
 
@@ -89,8 +102,10 @@ class QCHIQLChunkNew(nn.Module):
         feature_dim,
         action_dim,
         rep_dim=10,
-        hidden_dims=(512, 512, 512),
-        rep_hidden_dims=(512, 512, 512),
+        value_hidden_dims=(512, 512, 512),
+        actor_hidden_dims=(512, 512, 512),
+        goal_rep_hidden_dims=None,
+        layer_norm=True,
         log_std_min=-5.0,
         log_std_max=2.0,
     ):
@@ -102,6 +117,8 @@ class QCHIQLChunkNew(nn.Module):
         self.rep_dim = rep_dim
         self.log_std_min = log_std_min
         self.log_std_max = log_std_max
+        if goal_rep_hidden_dims is None:
+            goal_rep_hidden_dims = value_hidden_dims
 
         # phi(s, w) is the HIQL latent subgoal space.  The high value learns
         # V_H(s, phi(s, g)); the high actor predicts phi(s, s_{t+c}); and the
@@ -109,26 +126,42 @@ class QCHIQLChunkNew(nn.Module):
         self.goal_representation = MLP(
             2 * feature_dim,
             rep_dim,
-            rep_hidden_dims,
+            goal_rep_hidden_dims,
+            layer_norm,
         )
 
         # High level follows OGBench HIQL: twin V_H plus target twin V_H.
-        self.high_value = TwinMLP(feature_dim + rep_dim, 1, hidden_dims)
-        self.high_actor = ActorMLP(2 * feature_dim, rep_dim, hidden_dims)
+        self.high_value = TwinMLP(
+            feature_dim + rep_dim,
+            1,
+            value_hidden_dims,
+            layer_norm,
+        )
+        self.high_actor = ActorMLP(
+            2 * feature_dim,
+            rep_dim,
+            actor_hidden_dims,
+        )
 
         # Low level: V_L(s, z), Q_L(s, z, a_{t:t+k}), and pi_L.
         low_condition_dim = feature_dim + rep_dim
-        self.low_value = MLP(low_condition_dim, 1, hidden_dims)
+        self.low_value = MLP(
+            low_condition_dim,
+            1,
+            value_hidden_dims,
+            layer_norm,
+        )
         # Low level follows OGBench GCIQL: twin Q_L plus target twin Q_L.
         self.low_critic = TwinMLP(
             low_condition_dim + action_dim,
             1,
-            hidden_dims,
+            value_hidden_dims,
+            layer_norm,
         )
         self.low_actor = ActorMLP(
             low_condition_dim,
             action_dim,
-            hidden_dims,
+            actor_hidden_dims,
         )
 
         # OGBench HIQL uses constant policy standard deviations by default.

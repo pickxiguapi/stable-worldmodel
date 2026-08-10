@@ -14,15 +14,106 @@ from scripts.train.gchiql import (
     _gaussian_nll,
     _goal_reward_and_mask,
     get_chunk_td_constants,
-    get_data,
 )
+from scripts.train.gchiql import get_data as get_hierarchical_data
 from stable_worldmodel.wm.utils import save_pretrained
+
+
+def _get_subgoal_steps(cfg):
+    """Return ``(atomic_steps, sampled_steps)`` with legacy compatibility."""
+    if 'subgoal_horizon' in cfg:
+        # Legacy QCHIQL configs exposed raw steps as subgoal_horizon and used
+        # subgoal_steps for the already-downsampled dataset distance.
+        atomic_steps = int(cfg.subgoal_horizon)
+        sampled_steps = int(cfg.subgoal_steps)
+    else:
+        # Match OGBench HIQL: subgoal_steps is measured in atomic environment
+        # transitions.  Stable-WM samples one transition every frameskip.
+        atomic_steps = int(cfg.subgoal_steps)
+        if atomic_steps <= 0 or atomic_steps % cfg.frameskip != 0:
+            raise ValueError(
+                'subgoal_steps must be a positive multiple of frameskip, got '
+                f'{atomic_steps} and {cfg.frameskip}'
+            )
+        sampled_steps = atomic_steps // cfg.frameskip
+    if atomic_steps <= 0 or atomic_steps % cfg.frameskip != 0:
+        raise ValueError(
+            'subgoal_steps must be a positive multiple of frameskip, got '
+            f'{atomic_steps} and {cfg.frameskip}'
+        )
+    if sampled_steps != atomic_steps // cfg.frameskip:
+        raise ValueError(
+            'Legacy sampled subgoal_steps must equal '
+            'subgoal_horizon // frameskip, got '
+            f'{sampled_steps} versus {atomic_steps // cfg.frameskip}'
+        )
+    return atomic_steps, sampled_steps
+
+
+def _goal_probabilities(cfg, prefix):
+    """Convert OGBench goal fields to Stable-WM's four-way sampler."""
+    current_key = f'{prefix}_p_curgoal'
+    if current_key in cfg:
+        current = float(cfg[current_key])
+        trajectory = float(cfg[f'{prefix}_p_trajgoal'])
+        random = float(cfg[f'{prefix}_p_randomgoal'])
+        geometric = bool(cfg[f'{prefix}_geom_sample'])
+        return (
+            random,
+            trajectory if geometric else 0.0,
+            0.0 if geometric else trajectory,
+            current,
+        )
+
+    # Checkpoints produced before the OGBench naming alignment.
+    legacy_key = (
+        'goal_probabilities'
+        if prefix == 'value'
+        else 'actor_goal_probabilities'
+    )
+    legacy = cfg[legacy_key]
+    return (
+        float(legacy.random),
+        float(legacy.geometric_future),
+        float(legacy.uniform_future),
+        float(legacy.current),
+    )
+
+
+def get_data(cfg):
+    """Build hierarchical data using OGBench-compatible public names."""
+    _, sampled_subgoal_steps = _get_subgoal_steps(cfg)
+    value_probs = _goal_probabilities(cfg, 'value')
+    actor_probs = _goal_probabilities(cfg, 'actor')
+    data_cfg = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    data_cfg.subgoal_steps = sampled_subgoal_steps
+    data_cfg.goal_gamma = float(
+        cfg.get('goal_gamma', cfg.discount**cfg.frameskip)
+    )
+    data_cfg.goal_probabilities = {
+        'random': value_probs[0],
+        'geometric_future': value_probs[1],
+        'uniform_future': value_probs[2],
+        'current': value_probs[3],
+    }
+    data_cfg.actor_goal_probabilities = {
+        'random': actor_probs[0],
+        'geometric_future': actor_probs[1],
+        'uniform_future': actor_probs[2],
+        'current': actor_probs[3],
+    }
+    return get_hierarchical_data(data_cfg)
 
 
 def build_qchiql_chunk_new(cfg):
     """Build the five compact heads and their required OGBench targets."""
-    if cfg.get('encoder_type', 'vit_tiny') != 'vit_tiny':
-        raise ValueError('QCHIQL-Chunk-New requires encoder_type=vit_tiny')
+    encoder = cfg.get('encoder', cfg.get('encoder_type', 'vit_tiny'))
+    if encoder != 'vit_tiny':
+        raise ValueError('QCHIQL-Chunk-New requires encoder=vit_tiny')
+    if not cfg.get('const_std', True):
+        raise ValueError('QCHIQL-Chunk-New currently requires const_std=true')
+    if cfg.get('discrete', False):
+        raise ValueError('QCHIQL-Chunk-New currently requires discrete=false')
     if cfg.dinowm.get('use_proprio_encoder', False):
         raise ValueError(
             'QCHIQL-Chunk-New currently expects pixel-only inputs; set '
@@ -46,14 +137,35 @@ def build_qchiql_chunk_new(cfg):
             'High- and low-level encoder feature sizes must match'
         )
 
+    legacy_network = cfg.get('network', {})
+    value_hidden_dims = tuple(
+        cfg.get(
+            'value_hidden_dims',
+            legacy_network.get('hidden_dims', (512, 512, 512)),
+        )
+    )
+    actor_hidden_dims = tuple(
+        cfg.get(
+            'actor_hidden_dims',
+            legacy_network.get('hidden_dims', (512, 512, 512)),
+        )
+    )
+    goal_rep_hidden_dims = tuple(
+        cfg.get(
+            'value_hidden_dims',
+            legacy_network.get('rep_hidden_dims', value_hidden_dims),
+        )
+    )
     model = swm.wm.gcrl.QCHIQLChunkNew(
         high_encoder=high_encoder,
         low_encoder=low_encoder,
         feature_dim=feature_dim,
         action_dim=cfg.frameskip * cfg.dinowm.action_dim,
         rep_dim=cfg.rep_dim,
-        hidden_dims=tuple(cfg.network.hidden_dims),
-        rep_hidden_dims=tuple(cfg.network.rep_hidden_dims),
+        value_hidden_dims=value_hidden_dims,
+        actor_hidden_dims=actor_hidden_dims,
+        goal_rep_hidden_dims=goal_rep_hidden_dims,
+        layer_norm=cfg.get('layer_norm', True),
     )
     breakdown = model.parameter_breakdown()
     total = sum(p.numel() for p in model.parameters())
@@ -74,20 +186,7 @@ def get_qchiql_chunk_new_model(cfg):
     """Wrap the compact network in the Stable Pretraining trainer module."""
     history_size = cfg.dinowm.history_size
     td_offset = cfg.dinowm.td_offset
-    high_horizon = cfg.get(
-        'subgoal_horizon',
-        cfg.frameskip * cfg.subgoal_steps,
-    )
-    if high_horizon <= 0 or high_horizon % cfg.frameskip != 0:
-        raise ValueError(
-            'subgoal_horizon must be a positive multiple of frameskip, got '
-            f'{high_horizon} and {cfg.frameskip}'
-        )
-    if cfg.subgoal_steps != high_horizon // cfg.frameskip:
-        raise ValueError(
-            'subgoal_steps must equal subgoal_horizon // frameskip, got '
-            f'{cfg.subgoal_steps} versus {high_horizon // cfg.frameskip}'
-        )
+    high_horizon, _ = _get_subgoal_steps(cfg)
     if td_offset != 1:
         raise ValueError('QCHIQL-Chunk-New requires dinowm.td_offset=1')
     if not cfg.get('gc_negative', True):
