@@ -1,13 +1,21 @@
 """Evaluate a feed-forward policy that predicts multi-step action chunks."""
 
 import os
-
+import sys
+import time
+from pathlib import Path
 
 os.environ['MUJOCO_GL'] = 'egl'
 
-
-import time
-from pathlib import Path
+# Evaluation-only environment packages (MuJoCo, dm_control, pygame, etc.) may
+# live in a separate offline virtual environment on compute servers.  Append
+# them after the active interpreter's packages so they cannot shadow Torch or
+# other core StableWM dependencies.
+for extra_site_packages in os.environ.get(
+    'STABLEWM_EXTRA_SITE_PACKAGES', ''
+).split(os.pathsep):
+    if extra_site_packages:
+        sys.path.append(extra_site_packages)
 
 import hydra
 import numpy as np
@@ -21,7 +29,7 @@ import stable_worldmodel as swm
 
 
 def load_chunk_model(name: str):
-    """Rebuild and load a GCIQL-Chunk or GCHIQL-Chunk exported policy."""
+    """Rebuild and load a supported chunk-policy export."""
     checkpoint_root = swm.data.utils.get_cache_dir(sub_folder='checkpoints')
     checkpoint_path = checkpoint_root / name
     config_path = checkpoint_path.parent / 'config.json'
@@ -44,10 +52,16 @@ def load_chunk_model(name: str):
         from scripts.train.gchiql import get_gchiql_chunk_model
 
         module = get_gchiql_chunk_model(cfg)
+    elif run_name.startswith('qchiql_chunk_new_'):
+        from scripts.train.qchiql_chunk_new import (
+            get_qchiql_chunk_new_model,
+        )
+
+        module = get_qchiql_chunk_new_model(cfg)
     else:
         raise ValueError(
-            'eval_chunk.py only supports gciql_chunk_* and '
-            f'gchiql_chunk_* exports, got {run_name!r}'
+            'eval_chunk.py only supports gciql_chunk_*, gchiql_chunk_*, and '
+            f'qchiql_chunk_new_* exports, got {run_name!r}'
         )
 
     state_dict = torch.load(checkpoint_path, map_location='cpu')
