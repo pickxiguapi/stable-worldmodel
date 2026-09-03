@@ -81,7 +81,21 @@ def get_img_preprocessor(source, target, img_size=64, channels=3):
     repeats = channels // 3
     stats['mean'] = list(stats['mean']) * repeats
     stats['std'] = list(stats['std']) * repeats
+
+    def channel_first_tensor(x):
+        # Cached HDF5 columns are normally returned as tensors. Convert NumPy
+        # inputs too so ToImage never has to guess whether a 6-channel array is
+        # HWC or CHW.
+        if isinstance(x, np.ndarray):
+            x = torch.from_numpy(x)
+        if x.ndim >= 3 and x.shape[-1] == channels and x.shape[-3] != channels:
+            x = x.movedim(-1, -3)
+        return x
+
     return spt.data.transforms.Compose(
+        spt.data.transforms.WrapTorchTransform(
+            channel_first_tensor, source=source, target=target
+        ),
         spt.data.transforms.ToImage(**stats, source=source, target=target),
         spt.data.transforms.Resize(img_size, source=source, target=target),
     )
@@ -120,8 +134,13 @@ def fill_pixel_episode_goals(
         ):
             goal = raw_obs[goal_indices[ep]]
             if channel_last:
-                goal = np.moveaxis(goal, -1, 0)
-            augmented[offset : offset + length, source_channels:] = goal
+                augmented[
+                    offset : offset + length, ..., source_channels:
+                ] = goal
+            else:
+                augmented[
+                    offset : offset + length, source_channels:
+                ] = goal
         return
 
     for ep_start in range(0, len(episode_offsets), episodes_per_chunk):
@@ -136,8 +155,9 @@ def fill_pixel_episode_goals(
         )
         goals = raw_obs[repeated_goal_indices]
         if channel_last:
-            goals = np.moveaxis(goals, -1, 1)
-        augmented[row_start:row_stop, source_channels:] = goals
+            augmented[row_start:row_stop, ..., source_channels:] = goals
+        else:
+            augmented[row_start:row_stop, source_channels:] = goals
 
 
 @hydra.main(version_base=None, config_path='./config', config_name='tdmpc2')
@@ -197,13 +217,13 @@ def run(cfg):
                 augmented = np.empty(
                     (
                         len(_raw_obs),
-                        2 * source_channels,
                         _raw_obs.shape[1],
                         _raw_obs.shape[2],
+                        2 * source_channels,
                     ),
                     dtype=_raw_obs.dtype,
                 )
-                augmented[:, :source_channels] = np.moveaxis(_raw_obs, -1, 1)
+                augmented[..., :source_channels] = _raw_obs
                 fill_pixel_episode_goals(
                     augmented,
                     _raw_obs,
@@ -239,17 +259,22 @@ def run(cfg):
                     'Cannot identify the pixel channel axis in shape '
                     f'{_raw_obs.shape}'
                 )
-            expected_channels = int(
-                model_cfg.get('image_channels', augmented.shape[1])
+            augmented_channels = (
+                augmented.shape[-1]
+                if _raw_obs.shape[-1] in (1, 3, 4)
+                else augmented.shape[1]
             )
-            if augmented.shape[1] != expected_channels:
+            expected_channels = int(
+                model_cfg.get('image_channels', augmented_channels)
+            )
+            if augmented_channels != expected_channels:
                 raise ValueError(
-                    f'Goal-concatenated pixels have {augmented.shape[1]} '
+                    f'Goal-concatenated pixels have {augmented_channels} '
                     f'channels, but model.cfg.image_channels={expected_channels}'
                 )
             base_dataset._cache[goal_obs_key] = augmented
             dimension_summary = (
-                f'channels {source_channels} → {augmented.shape[1]}'
+                f'channels {source_channels} → {augmented_channels}'
             )
         else:
             goals_by_step = np.empty_like(_raw_obs)
