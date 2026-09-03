@@ -143,6 +143,29 @@ def fill_pixel_episode_goals(
                 ] = goal
         return
 
+    # Converted OGBench segments all have the same length. Reshape the
+    # contiguous row axis into (episode, step) and broadcast one gathered goal
+    # image per episode across its steps. This avoids materializing a repeated
+    # multi-million-row goal array.
+    fixed_length = int(episode_lengths[0])
+    if np.all(episode_lengths == fixed_length):
+        episode_goals = raw_obs[goal_indices]
+        if channel_last:
+            shaped = augmented.reshape(
+                len(episode_offsets),
+                fixed_length,
+                *augmented.shape[1:],
+            )
+            shaped[..., source_channels:] = episode_goals[:, None]
+        else:
+            shaped = augmented.reshape(
+                len(episode_offsets),
+                fixed_length,
+                *augmented.shape[1:],
+            )
+            shaped[:, :, source_channels:] = episode_goals[:, None]
+        return
+
     for ep_start in range(0, len(episode_offsets), episodes_per_chunk):
         ep_stop = min(ep_start + episodes_per_chunk, len(episode_offsets))
         row_start = int(episode_offsets[ep_start])
