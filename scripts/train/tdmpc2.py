@@ -88,7 +88,18 @@ def get_img_preprocessor(source, target, img_size=64, channels=3):
         # HWC or CHW.
         if isinstance(x, np.ndarray):
             x = torch.from_numpy(x)
-        if x.ndim >= 3 and x.shape[-1] == channels and x.shape[-3] != channels:
+        if (
+            x.ndim >= 4
+            and x.shape[-4] * x.shape[-1] == channels
+            and x.shape[-1] in (1, 3, 4)
+        ):
+            # (..., current_or_goal, H, W, C) -> (..., 2*C, H, W)
+            x = x.movedim(-1, -3).flatten(-4, -3)
+        elif (
+            x.ndim >= 3
+            and x.shape[-1] == channels
+            and x.shape[-3] != channels
+        ):
             x = x.movedim(-1, -3)
         return x
 
@@ -134,9 +145,7 @@ def fill_pixel_episode_goals(
         ):
             goal = raw_obs[goal_indices[ep]]
             if channel_last:
-                augmented[
-                    offset : offset + length, ..., source_channels:
-                ] = goal
+                augmented[offset : offset + length, 1] = goal
             else:
                 augmented[
                     offset : offset + length, source_channels:
@@ -156,7 +165,7 @@ def fill_pixel_episode_goals(
                 fixed_length,
                 *augmented.shape[1:],
             )
-            shaped[..., source_channels:] = episode_goals[:, None]
+            shaped[:, :, 1] = episode_goals[:, None]
         else:
             shaped = augmented.reshape(
                 len(episode_offsets),
@@ -178,7 +187,7 @@ def fill_pixel_episode_goals(
         )
         goals = raw_obs[repeated_goal_indices]
         if channel_last:
-            augmented[row_start:row_stop, ..., source_channels:] = goals
+            augmented[row_start:row_stop, 1] = goals
         else:
             augmented[row_start:row_stop, source_channels:] = goals
 
@@ -240,13 +249,14 @@ def run(cfg):
                 augmented = np.empty(
                     (
                         len(_raw_obs),
+                        2,
                         _raw_obs.shape[1],
                         _raw_obs.shape[2],
-                        2 * source_channels,
+                        source_channels,
                     ),
                     dtype=_raw_obs.dtype,
                 )
-                augmented[..., :source_channels] = _raw_obs
+                augmented[:, 0] = _raw_obs
                 fill_pixel_episode_goals(
                     augmented,
                     _raw_obs,
@@ -283,7 +293,7 @@ def run(cfg):
                     f'{_raw_obs.shape}'
                 )
             augmented_channels = (
-                augmented.shape[-1]
+                augmented.shape[1] * augmented.shape[-1]
                 if _raw_obs.shape[-1] in (1, 3, 4)
                 else augmented.shape[1]
             )
