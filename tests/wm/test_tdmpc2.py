@@ -34,3 +34,8 @@ def test_tdmpc2_accepts_current_and_goal_rgb_channels():
     goal = torch.randn(2, 3, 64, 64)
     goal_encoded = model.encode({'pixels': current, 'goal': goal})
     assert goal_encoded.shape == (2, 128)
+
+    current_hwc = current.movedim(1, -1)
+    goal_hwc = goal.movedim(1, -1)
+    goal_encoded_hwc = model.encode({'pixels': current_hwc, 'goal': goal_hwc})
+    assert goal_encoded_hwc.shape == (2, 128)

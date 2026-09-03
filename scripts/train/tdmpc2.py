@@ -207,6 +207,11 @@ def run(cfg):
             f'Goal augmentation: appended last obs of each episode to "{goal_obs_key}" '
             f'({dimension_summary})'
         )
+        # The cache now owns the augmented array; release the raw source view
+        # before training so large visual datasets do not stay resident twice.
+        del _raw_obs
+        if goal_obs_key != 'pixels':
+            del goals_by_step
 
     raw_actions = base_dataset.get_col_data('action')[:]
     valid_actions = raw_actions[~np.isnan(raw_actions).any(axis=1)]

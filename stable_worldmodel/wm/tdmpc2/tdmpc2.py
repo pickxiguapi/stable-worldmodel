@@ -178,8 +178,14 @@ class TDMPC2(nn.Module):
             obs = self._prepare_pixels(obs_dict['pixels'], goal).to(
                 target_dtype
             )
-            if obs.shape[-1] == 3:
+            expected_channels = self.cnn[0].in_channels
+            if obs.shape[-1] == expected_channels:
                 obs = obs.movedim(-1, -3)
+            elif obs.shape[-3] != expected_channels:
+                raise ValueError(
+                    f'Expected {expected_channels} pixel channels, got '
+                    f'{tuple(obs.shape)}'
+                )
             lead_dims = obs.shape[:-3]  # e.g. (B,) or (B, T)
             obs_flat = obs.reshape(
                 -1, *obs.shape[-3:]
