@@ -8,6 +8,11 @@ set -euo pipefail
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STABLEWM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
+# The clean checkout reuses an existing virtualenv whose editable install may
+# point at an older working tree.  Put this checkout first so every Python
+# entry point imports the exact GitHub-main source paired with this Bash.
+export PYTHONPATH="$STABLEWM_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+
 MODE=${MODE:-status}
 PYTHON_BIN=${PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
 SOURCE_ROOT=${SOURCE_ROOT:-/root/data/yyf/ogbench-cache/data}
