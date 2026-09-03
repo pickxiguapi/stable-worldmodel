@@ -215,7 +215,9 @@ def convert(
             # The final observation in a segment has no outgoing transition.
             # Zeroing it avoids preserving a misleading action from the next
             # source transition; the loader never trains on this final action.
-            action_ds[goal_rows] = 0.0
+            action_ds[goal_rows] = np.zeros(
+                (len(goal_rows), actions.shape[1]), dtype=np.float32
+            )
 
             output.attrs['format'] = 'ogbench_goal_tdmpc2_pixels_v1'
             output.attrs['source'] = str(source)
