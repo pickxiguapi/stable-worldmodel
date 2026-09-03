@@ -1,17 +1,18 @@
 from functools import partial
 from pathlib import Path
+
 import hydra
 import lightning as pl
+import numpy as np
 import stable_pretraining as spt
-import stable_worldmodel as swm
 import torch
 from lightning.pytorch.callbacks import Callback
 from lightning.pytorch.loggers import WandbLogger
 from loguru import logger as logging
 from omegaconf import OmegaConf, open_dict
 from torch.utils.data import DataLoader
-import numpy as np
 
+import stable_worldmodel as swm
 from stable_worldmodel.wm.tdmpc2 import tdmpc2_forward
 from stable_worldmodel.wm.utils import save_pretrained
 
@@ -86,6 +87,59 @@ def get_img_preprocessor(source, target, img_size=64, channels=3):
     )
 
 
+def fill_pixel_episode_goals(
+    augmented,
+    raw_obs,
+    episode_offsets,
+    episode_lengths,
+    goal_indices,
+    source_channels,
+    channel_last,
+    episodes_per_chunk=256,
+):
+    """Fill the goal-channel half of a pixel cache in bounded chunks.
+
+    A Python assignment per episode is prohibitively slow for multi-million
+    frame datasets. Converted OGBench segments are contiguous, so repeat the
+    one goal index per episode into modest row chunks and let NumPy perform
+    each gather/copy in compiled code. The fallback preserves correctness for
+    datasets whose episode rows are not contiguous.
+    """
+    contiguous = (
+        len(episode_offsets) > 0
+        and int(episode_offsets[0]) == 0
+        and int(episode_offsets[-1] + episode_lengths[-1]) == len(raw_obs)
+        and np.all(
+            episode_offsets[1:]
+            == episode_offsets[:-1] + episode_lengths[:-1]
+        )
+    )
+    if not contiguous:
+        for ep, (offset, length) in enumerate(
+            zip(episode_offsets.tolist(), episode_lengths.tolist())
+        ):
+            goal = raw_obs[goal_indices[ep]]
+            if channel_last:
+                goal = np.moveaxis(goal, -1, 0)
+            augmented[offset : offset + length, source_channels:] = goal
+        return
+
+    for ep_start in range(0, len(episode_offsets), episodes_per_chunk):
+        ep_stop = min(ep_start + episodes_per_chunk, len(episode_offsets))
+        row_start = int(episode_offsets[ep_start])
+        row_stop = int(
+            episode_offsets[ep_stop - 1] + episode_lengths[ep_stop - 1]
+        )
+        repeated_goal_indices = np.repeat(
+            goal_indices[ep_start:ep_stop],
+            episode_lengths[ep_start:ep_stop],
+        )
+        goals = raw_obs[repeated_goal_indices]
+        if channel_last:
+            goals = np.moveaxis(goals, -1, 1)
+        augmented[row_start:row_stop, source_channels:] = goals
+
+
 @hydra.main(version_base=None, config_path='./config', config_name='tdmpc2')
 def run(cfg):
     """
@@ -150,11 +204,15 @@ def run(cfg):
                     dtype=_raw_obs.dtype,
                 )
                 augmented[:, :source_channels] = np.moveaxis(_raw_obs, -1, 1)
-                for _ep, (_off, _len) in enumerate(
-                    zip(_ep_off.tolist(), _ep_len.tolist())
-                ):
-                    goal = np.moveaxis(_raw_obs[_goal_idx[_ep]], -1, 0)
-                    augmented[_off : _off + _len, source_channels:] = goal
+                fill_pixel_episode_goals(
+                    augmented,
+                    _raw_obs,
+                    _ep_off,
+                    _ep_len,
+                    _goal_idx,
+                    source_channels,
+                    channel_last=True,
+                )
             elif _raw_obs.shape[1] in (1, 3, 4):
                 source_channels = _raw_obs.shape[1]
                 augmented = np.empty(
@@ -167,12 +225,15 @@ def run(cfg):
                     dtype=_raw_obs.dtype,
                 )
                 augmented[:, :source_channels] = _raw_obs
-                for _ep, (_off, _len) in enumerate(
-                    zip(_ep_off.tolist(), _ep_len.tolist())
-                ):
-                    augmented[_off : _off + _len, source_channels:] = _raw_obs[
-                        _goal_idx[_ep]
-                    ]
+                fill_pixel_episode_goals(
+                    augmented,
+                    _raw_obs,
+                    _ep_off,
+                    _ep_len,
+                    _goal_idx,
+                    source_channels,
+                    channel_last=False,
+                )
             else:
                 raise ValueError(
                     'Cannot identify the pixel channel axis in shape '
