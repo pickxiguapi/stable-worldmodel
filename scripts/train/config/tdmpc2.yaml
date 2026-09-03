@@ -42,6 +42,7 @@ model:
   _recursive_: false
   cfg:
     image_size: 64
+    image_channels: 3
     wm:
       horizon: 5
       mlp_dim: 384

@@ -70,9 +70,16 @@ def get_column_normalizer(dataset, source, target):
     )
 
 
-def get_img_preprocessor(source, target, img_size=64):
+def get_img_preprocessor(source, target, img_size=64, channels=3):
     """ImageNet-normalized + resized image preprocessing pipeline."""
-    stats = spt.data.dataset_stats.ImageNet
+    stats = dict(spt.data.dataset_stats.ImageNet)
+    if channels % 3 != 0:
+        raise ValueError(
+            f'ImageNet normalization requires RGB groups, got {channels} channels'
+        )
+    repeats = channels // 3
+    stats['mean'] = list(stats['mean']) * repeats
+    stats['std'] = list(stats['std']) * repeats
     return spt.data.transforms.Compose(
         spt.data.transforms.ToImage(**stats, source=source, target=target),
         spt.data.transforms.Resize(img_size, source=source, target=target),
@@ -125,17 +132,80 @@ def run(cfg):
         )
         _ep_len = base_dataset.get_col_data('ep_len')[:].flatten().astype(int)
         _goal_idx = np.clip(_ep_off + _ep_len - 1, 0, len(_raw_obs) - 1)
-        goals_by_step = np.empty_like(_raw_obs)
-        for _ep, (_off, _len) in enumerate(
-            zip(_ep_off.tolist(), _ep_len.tolist())
-        ):
-            goals_by_step[_off : _off + _len] = _raw_obs[_goal_idx[_ep]]
-        base_dataset._cache[goal_obs_key] = np.concatenate(
-            [_raw_obs, goals_by_step], axis=-1
-        )
+        if goal_obs_key == 'pixels':
+            if _raw_obs.ndim != 4:
+                raise ValueError(
+                    'Pixel goal augmentation expects NCHW or NHWC images, '
+                    f'got {_raw_obs.shape}'
+                )
+            if _raw_obs.shape[-1] in (1, 3, 4):
+                source_channels = _raw_obs.shape[-1]
+                augmented = np.empty(
+                    (
+                        len(_raw_obs),
+                        2 * source_channels,
+                        _raw_obs.shape[1],
+                        _raw_obs.shape[2],
+                    ),
+                    dtype=_raw_obs.dtype,
+                )
+                augmented[:, :source_channels] = np.moveaxis(_raw_obs, -1, 1)
+                for _ep, (_off, _len) in enumerate(
+                    zip(_ep_off.tolist(), _ep_len.tolist())
+                ):
+                    goal = np.moveaxis(_raw_obs[_goal_idx[_ep]], -1, 0)
+                    augmented[_off : _off + _len, source_channels:] = goal
+            elif _raw_obs.shape[1] in (1, 3, 4):
+                source_channels = _raw_obs.shape[1]
+                augmented = np.empty(
+                    (
+                        len(_raw_obs),
+                        2 * source_channels,
+                        _raw_obs.shape[2],
+                        _raw_obs.shape[3],
+                    ),
+                    dtype=_raw_obs.dtype,
+                )
+                augmented[:, :source_channels] = _raw_obs
+                for _ep, (_off, _len) in enumerate(
+                    zip(_ep_off.tolist(), _ep_len.tolist())
+                ):
+                    augmented[_off : _off + _len, source_channels:] = _raw_obs[
+                        _goal_idx[_ep]
+                    ]
+            else:
+                raise ValueError(
+                    'Cannot identify the pixel channel axis in shape '
+                    f'{_raw_obs.shape}'
+                )
+            expected_channels = int(
+                model_cfg.get('image_channels', augmented.shape[1])
+            )
+            if augmented.shape[1] != expected_channels:
+                raise ValueError(
+                    f'Goal-concatenated pixels have {augmented.shape[1]} '
+                    f'channels, but model.cfg.image_channels={expected_channels}'
+                )
+            base_dataset._cache[goal_obs_key] = augmented
+            dimension_summary = (
+                f'channels {source_channels} → {augmented.shape[1]}'
+            )
+        else:
+            goals_by_step = np.empty_like(_raw_obs)
+            for _ep, (_off, _len) in enumerate(
+                zip(_ep_off.tolist(), _ep_len.tolist())
+            ):
+                goals_by_step[_off : _off + _len] = _raw_obs[_goal_idx[_ep]]
+            base_dataset._cache[goal_obs_key] = np.concatenate(
+                [_raw_obs, goals_by_step], axis=-1
+            )
+            dimension_summary = (
+                f'dim {_raw_obs.shape[-1]} → '
+                f'{base_dataset._cache[goal_obs_key].shape[-1]}'
+            )
         logging.info(
             f'Goal augmentation: appended last obs of each episode to "{goal_obs_key}" '
-            f'(dim {_raw_obs.shape[-1]} → {base_dataset._cache[goal_obs_key].shape[-1]})'
+            f'({dimension_summary})'
         )
 
     raw_actions = base_dataset.get_col_data('action')[:]
@@ -166,7 +236,12 @@ def run(cfg):
     transforms = []
     if use_pixels:
         transforms.append(
-            get_img_preprocessor('pixels', 'pixels', model_cfg.image_size)
+            get_img_preprocessor(
+                'pixels',
+                'pixels',
+                model_cfg.image_size,
+                int(model_cfg.get('image_channels', 3)),
+            )
         )
 
     for key in extra_keys:

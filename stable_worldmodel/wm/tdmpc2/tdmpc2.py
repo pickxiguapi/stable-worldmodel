@@ -52,8 +52,9 @@ class TDMPC2(nn.Module):
         self.latent_dim = 0
 
         if self.use_pixels:
+            image_channels = int(cfg.get('image_channels', 3))
             self.cnn = nn.Sequential(
-                nn.Conv2d(3, 32, 7, stride=2),
+                nn.Conv2d(image_channels, 32, 7, stride=2),
                 nn.Mish(),
                 nn.Conv2d(32, 32, 5, stride=2),
                 nn.Mish(),
@@ -64,7 +65,9 @@ class TDMPC2(nn.Module):
                 nn.Flatten(),
             )
             with torch.no_grad():
-                dummy = torch.zeros(1, 3, cfg.image_size, cfg.image_size)
+                dummy = torch.zeros(
+                    1, image_channels, cfg.image_size, cfg.image_size
+                )
                 cnn_out_dim = self.cnn(dummy).shape[1]
 
             pixel_dim = encoding_cfg['pixels']
@@ -139,6 +142,27 @@ class TDMPC2(nn.Module):
         for q in self.target_qs:
             zero_init([q[-1].weight])
 
+    def _prepare_pixels(
+        self, pixels: torch.Tensor, goal: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Match RGB or current+goal RGB inputs to the configured CNN."""
+        expected = self.cnn[0].in_channels
+        if pixels.shape[-3] == expected or pixels.shape[-1] == expected:
+            return pixels
+        if goal is None:
+            raise ValueError(
+                f'TD-MPC2 CNN expects {expected} image channels, but the '
+                'observation has no goal image to concatenate.'
+            )
+        if pixels.shape[-3] * 2 == expected:
+            return torch.cat([pixels, goal], dim=-3)
+        if pixels.shape[-1] * 2 == expected:
+            return torch.cat([pixels, goal], dim=-1)
+        raise ValueError(
+            f'Cannot form {expected} input channels from pixels '
+            f'{tuple(pixels.shape)} and goal {tuple(goal.shape)}.'
+        )
+
     def encode(self, obs_dict: dict) -> torch.Tensor:
         """Encode observations into a SimNorm-normalized latent state.
 
@@ -150,7 +174,10 @@ class TDMPC2(nn.Module):
 
         # Process primary vision modality — flatten all leading dims into batch
         if self.use_pixels:
-            obs = obs_dict['pixels'].to(target_dtype)
+            goal = obs_dict.get('goal')
+            obs = self._prepare_pixels(obs_dict['pixels'], goal).to(
+                target_dtype
+            )
             if obs.shape[-1] == 3:
                 obs = obs.movedim(-1, -3)
             lead_dims = obs.shape[:-3]  # e.g. (B,) or (B, T)
@@ -248,6 +275,8 @@ class TDMPC2(nn.Module):
         encoding_keys = list(self.cfg.wm.get('encoding', {}).keys())
 
         obs_dict = {key: info_dict[key].to(device) for key in encoding_keys}
+        if self.use_pixels and 'goal' in info_dict:
+            obs_dict['goal'] = info_dict['goal'].to(device)
         z = self.encode(obs_dict)
 
         if prefix_actions is not None:
@@ -279,6 +308,8 @@ class TDMPC2(nn.Module):
         encoding_keys = list(self.cfg.wm.get('encoding', {}).keys())
 
         obs_dict = {key: info_dict[key].to(device) for key in encoding_keys}
+        if self.use_pixels and 'goal' in info_dict:
+            obs_dict['goal'] = info_dict['goal'].to(device)
         z = self.encode(obs_dict)
 
         B, N, H, A = action_candidates.shape
