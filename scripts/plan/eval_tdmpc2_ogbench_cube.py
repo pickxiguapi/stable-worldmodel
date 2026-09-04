@@ -5,10 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import time
 from pathlib import Path
 
 os.environ.setdefault('MUJOCO_GL', 'egl')
+if extra_site := os.environ.get('OGBENCH_SITE_PACKAGES'):
+    # Reuse only missing environment extras from the clean OGBench runtime;
+    # the TD-MPC2 environment remains earlier on sys.path and authoritative.
+    sys.path.append(extra_site)
 
 import gymnasium as gym
 import numpy as np
@@ -28,6 +33,13 @@ IMAGENET_STD = (0.229, 0.224, 0.225)
 
 class TargetToGoalWrapper(gym.Wrapper):
     """Expose the CubeEnv target image under the policy's canonical key."""
+
+    def __init__(self, env):
+        super().__init__(env)
+        # CubeEnv's current main-branch implementation reads this compatibility
+        # flag during reset, but its OGBench base class does not accept it as a
+        # constructor keyword.
+        self.env.unwrapped._render_goal = False
 
     @staticmethod
     def _with_goal(info: dict) -> dict:
@@ -265,7 +277,6 @@ def main() -> None:
         width=image_size,
         reward_task_id=args.reward_task_id,
         terminate_at_goal=True,
-        render_goal=True,
     )
     world.set_policy(policy)
 
