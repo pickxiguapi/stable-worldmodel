@@ -65,6 +65,7 @@ run_one() {
   checkpoint=$(checkpoint_path "$TASK_INDEX")
   local output_dir="$EVAL_ROOT/$RUN_LABEL/${labels[$TASK_INDEX]}"
   local video_arg=()
+  mkdir -p "$EVAL_ROOT/$RUN_LABEL"
   if [[ "$NO_VIDEO" == 1 ]]; then
     video_arg=(--no-video)
   fi

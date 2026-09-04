@@ -219,7 +219,11 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=False)
     videos = None if args.no_video else output_dir / 'videos'
 
-    model = load_pretrained(str(checkpoint), cache_dir='/').cuda().eval()
+    # ``name`` is absolute, so the cache is only a writable scratch location
+    # required by the generic loader before it resolves the checkpoint path.
+    model = load_pretrained(
+        str(checkpoint), cache_dir=str(output_dir)
+    ).cuda().eval()
     model.requires_grad_(False)
     image_size = int(model.cfg.get('image_size', 64))
 
