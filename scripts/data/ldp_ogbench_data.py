@@ -184,7 +184,7 @@ class OGBenchLDPData:
         )
         future_rows = offsets[:, None] + future_relative
         action_relative = np.minimum(
-            relative_start[:, None] + steps - 1, (lengths - 2)[:, None]
+            relative_start[:, None] + steps - 1, (lengths - 1)[:, None]
         )
         action_rows = offsets[:, None] + action_relative
 

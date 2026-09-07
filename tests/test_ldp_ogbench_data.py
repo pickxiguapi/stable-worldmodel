@@ -18,6 +18,7 @@ def make_data(source_path: Path, latent_path: Path) -> None:
     pixels[:, 0, 0, 0] = np.arange(rows)
     actions = np.repeat(np.arange(rows, dtype=np.float32)[:, None], 2, axis=1)
     actions = actions / actions.max()
+    actions[offsets + lengths - 1] = 0.0
     terminals = np.zeros(rows, dtype=bool)
     terminals[offsets + lengths - 1] = True
     with h5py.File(source_path, 'w') as source:
@@ -59,12 +60,15 @@ def test_goal_windows_are_aligned_and_episode_safe(tmp_path):
     np.testing.assert_array_equal(batch['goal_rows'], episode_ends)
     assert np.all(batch['current_rows'] >= episode_offsets)
     assert np.all(batch['future_rows'] <= episode_ends[:, None])
-    assert np.all(batch['action_rows'] < episode_ends[:, None])
+    assert np.all(batch['action_rows'] <= episode_ends[:, None])
     np.testing.assert_array_equal(batch['current'][..., 0], batch['current_rows'][:, None])
     np.testing.assert_array_equal(batch['future'][..., 0], batch['future_rows'])
     np.testing.assert_array_equal(batch['goal'][..., 0], batch['goal_rows'])
     assert batch['future'].shape == (128, 8, 3)
     assert batch['actions'].shape == (128, 8, 2)
+    padded = batch['action_rows'] == episode_ends[:, None]
+    assert padded.any()
+    assert np.all(batch['actions'][padded] == 0.0)
 
     normalized = data.normalize_latent(np.array([0, 17], dtype=np.float32))
     np.testing.assert_allclose(normalized, [-1, 1])
