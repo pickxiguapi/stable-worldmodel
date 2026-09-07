@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Yingbo Cloud: goal-conditioned LDP on official OGBench cube-single.
+# Yingbo Cloud: goal-conditioned LDP on an official visual OGBench task.
 # Every environment, validation, smoke, training, and evaluation action routes here.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -12,7 +12,9 @@ PYTHON_BIN=${PYTHON_BIN:-/root/data/yyf/ogbench-new/.venv/bin/python}
 TEST_PYTHON_BIN=${TEST_PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
 OVERLAY_INSTALLER_BIN=${OVERLAY_INSTALLER_BIN:-/usr/bin/python3.10}
 ENV_SPEC=${ENV_SPEC:-$STABLEWM_ROOT/scripts/config/ldp_ogbench_env_spec.json}
-SOURCE_DATASET=${SOURCE_DATASET:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50/visual-cube-single-play-v0.h5}
+DATASET_ROOT=${DATASET_ROOT:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50}
+DATASET_ID=${DATASET_ID:-visual-cube-single-play-v0}
+SOURCE_DATASET=${SOURCE_DATASET:-$DATASET_ROOT/$DATASET_ID.h5}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/root/data/yyf/ldp-ogbench}
 LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-$ARTIFACT_ROOT/runtime}
 LDP_OVERLAY=${LDP_OVERLAY:-$LDP_RUNTIME_ROOT/site-packages}
@@ -43,10 +45,17 @@ DIFFUSION_STEPS=${DIFFUSION_STEPS:-100}
 EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
-ENV_ID=${ENV_ID:-visual-cube-single-v0}
+DEFAULT_ENV_ID=${DATASET_ID/-play/}
+DEFAULT_ENV_ID=${DEFAULT_ENV_ID/-noisy/}
+ENV_ID=${ENV_ID:-$DEFAULT_ENV_ID}
+DEFAULT_TASK_TAG=${DATASET_ID#visual-}
+DEFAULT_TASK_TAG=${DEFAULT_TASK_TAG%-v0}
+DEFAULT_TASK_TAG=${DEFAULT_TASK_TAG//-/_}
+TASK_TAG=${TASK_TAG:-$DEFAULT_TASK_TAG}
+REWARD_TASK_ID=${REWARD_TASK_ID:-2}
 RESUME=${RESUME:-0}
 
-RUN_NAME="ldp_cube_single_${RUN_LABEL}_s${SEED}"
+RUN_NAME="ldp_${TASK_TAG}_${RUN_LABEL}_s${SEED}"
 VAE_DIR=${VAE_DIR:-$ARTIFACT_ROOT/runs/${RUN_NAME}_vae}
 LATENT_FILE=${LATENT_FILE:-$ARTIFACT_ROOT/data/${RUN_NAME}_latents.h5}
 LDP_DIR=${LDP_DIR:-$ARTIFACT_ROOT/runs/${RUN_NAME}_ldp}
@@ -279,7 +288,8 @@ run_eval() {
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py eval \
     --run-dir "$LDP_DIR" --vae-dir "$VAE_DIR" --output-dir "$EVAL_DIR" \
     --env-id "$ENV_ID" --episodes "$EPISODES" --seed "$EVAL_SEED" \
-    --max-episode-steps "$MAX_EPISODE_STEPS"
+    --max-episode-steps "$MAX_EPISODE_STEPS" \
+    --reward-task-id "$REWARD_TASK_ID"
 }
 
 pipeline() {
@@ -330,7 +340,7 @@ launch() {
     exit 4
   fi
   tmux new-session -d -s "$session" \
-    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
+    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' DATASET_ROOT='$DATASET_ROOT' DATASET_ID='$DATASET_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' TASK_TAG='$TASK_TAG' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' VAE_LOG_EVERY='$VAE_LOG_EVERY' VAE_SAVE_EVERY='$VAE_SAVE_EVERY' ENCODE_BATCH_SIZE='$ENCODE_BATCH_SIZE' VAE_VALIDATION_SAMPLES='$VAE_VALIDATION_SAMPLES' MAX_VAE_VALIDATION_MSE='$MAX_VAE_VALIDATION_MSE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' LDP_LOG_EVERY='$LDP_LOG_EVERY' LDP_SAVE_EVERY='$LDP_SAVE_EVERY' LDP_VALIDATION_BATCHES='$LDP_VALIDATION_BATCHES' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' ENV_ID='$ENV_ID' REWARD_TASK_ID='$REWARD_TASK_ID' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' RESUME='$RESUME' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
   echo "LAUNCHED session=$session gpu=$GPU_ID log=$ARTIFACT_ROOT/${RUN_NAME}.log"
 }
 

@@ -935,12 +935,20 @@ def make_sampler(config: dict[str, Any], params: Any):
     return sample
 
 
-def cube_goal_distance(env) -> float:
-    unwrapped = env.unwrapped
-    cube_pos = unwrapped._data.joint('object_joint_0').qpos[:3]
-    target_id = unwrapped._cube_target_mocap_ids[0]
-    target_pos = unwrapped._data.mocap_pos[target_id]
-    return float(np.linalg.norm(cube_pos - target_pos))
+def task_goal_residual(env) -> float:
+    """Return the official task residual for any supported OGBench scene.
+
+    The cube environments expose between one and three objects, while the scene
+    environment additionally contains buttons, a drawer, and a window.  A
+    distance to ``object_joint_0`` therefore is neither complete for multi-cube
+    tasks nor meaningful for scene tasks.  OGBench's task reward already counts
+    all required goal components and is zero exactly when they are all
+    satisfied.  Negating it gives a task-generic, non-negative residual.
+    """
+    reward = float(env.unwrapped.compute_reward())
+    if not np.isfinite(reward):
+        raise RuntimeError(f'Non-finite OGBench task reward: {reward}')
+    return max(0.0, -reward)
 
 
 def evaluate(args: argparse.Namespace) -> None:
@@ -991,9 +999,9 @@ def evaluate(args: argparse.Namespace) -> None:
     successes: list[bool] = []
     returns: list[float] = []
     lengths: list[int] = []
-    initial_distances: list[float] = []
-    final_distances: list[float] = []
-    minimum_distances: list[float] = []
+    initial_residuals: list[float] = []
+    final_residuals: list[float] = []
+    minimum_residuals: list[float] = []
     action_norms: list[float] = []
     key = jax.random.PRNGKey(args.seed)
     started = time.time()
@@ -1010,8 +1018,8 @@ def evaluate(args: argparse.Namespace) -> None:
                     f'Expected 64x64 RGB current/goal, got {observation.shape}/{goal.shape}'
                 )
             goal_latent = encode_pixels(jnp.asarray(goal[None]))
-            initial_distance = cube_goal_distance(env)
-            minimum_distance = initial_distance
+            initial_residual = task_goal_residual(env)
+            minimum_residual = initial_residual
             episode_return = 0.0
             episode_action_norms: list[float] = []
             success = bool(info.get('success', False))
@@ -1027,27 +1035,27 @@ def evaluate(args: argparse.Namespace) -> None:
                 action, queued_actions = queued_actions[0], queued_actions[1:]
                 episode_action_norms.append(float(np.linalg.norm(action)))
                 observation, reward, terminated, truncated, info = env.step(action)
-                distance = cube_goal_distance(env)
-                minimum_distance = min(minimum_distance, distance)
+                residual = task_goal_residual(env)
+                minimum_residual = min(minimum_residual, residual)
                 episode_return += float(reward)
                 success = success or bool(info.get('success', False))
                 length = step + 1
                 if terminated or truncated:
                     break
-            final_distance = cube_goal_distance(env)
+            final_residual = task_goal_residual(env)
             successes.append(success)
             returns.append(episode_return)
             lengths.append(length)
-            initial_distances.append(initial_distance)
-            final_distances.append(final_distance)
-            minimum_distances.append(minimum_distance)
+            initial_residuals.append(initial_residual)
+            final_residuals.append(final_residual)
+            minimum_residuals.append(minimum_residual)
             action_norms.append(float(np.mean(episode_action_norms)))
             print(
                 f'EPISODE episode={episode + 1} success={int(success)} '
                 f'return={episode_return:.6f} length={length} '
-                f'initial_distance={initial_distance:.6f} '
-                f'final_distance={final_distance:.6f} '
-                f'min_distance={minimum_distance:.6f} '
+                f'initial_goal_residual={initial_residual:.6f} '
+                f'final_goal_residual={final_residual:.6f} '
+                f'min_goal_residual={minimum_residual:.6f} '
                 f'mean_action_norm={action_norms[-1]:.6f}',
                 flush=True,
             )
@@ -1065,9 +1073,9 @@ def evaluate(args: argparse.Namespace) -> None:
         'episode_successes': successes,
         'episode_returns': returns,
         'episode_lengths': lengths,
-        'initial_cube_goal_distances': initial_distances,
-        'final_cube_goal_distances': final_distances,
-        'minimum_cube_goal_distances': minimum_distances,
+        'initial_goal_residuals': initial_residuals,
+        'final_goal_residuals': final_residuals,
+        'minimum_goal_residuals': minimum_residuals,
         'mean_action_norms': action_norms,
         'elapsed_seconds': time.time() - started,
         'environment': {

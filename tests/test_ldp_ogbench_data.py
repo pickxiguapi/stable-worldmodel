@@ -8,6 +8,7 @@ from scripts.data.ldp_ogbench_data import (
     REWARD_SCHEME,
     h5_take,
 )
+from scripts.train.ldp_ogbench import task_goal_residual
 
 
 def make_data(source_path: Path, latent_path: Path) -> None:
@@ -101,3 +102,20 @@ def test_partial_latents_must_end_on_episode_boundary(tmp_path):
         partial.create_dataset('latent', data=values)
     with np.testing.assert_raises_regex(ValueError, 'episode boundary'):
         OGBenchLDPData(source, partial_latent)
+
+
+def test_task_goal_residual_uses_generic_official_reward():
+    class FakeEnv:
+        unwrapped = None
+
+        def __init__(self, reward):
+            self.reward = reward
+            self.unwrapped = self
+
+        def compute_reward(self):
+            return self.reward
+
+    assert task_goal_residual(FakeEnv(-3.0)) == 3.0
+    assert task_goal_residual(FakeEnv(0.0)) == 0.0
+    with np.testing.assert_raises_regex(RuntimeError, 'Non-finite'):
+        task_goal_residual(FakeEnv(np.nan))
