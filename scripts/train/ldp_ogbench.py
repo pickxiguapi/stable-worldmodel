@@ -73,6 +73,12 @@ def verify_upstream() -> str:
     return commit
 
 
+def adapter_commit() -> str:
+    return subprocess.check_output(
+        ['git', '-C', str(repo_root()), 'rev-parse', 'HEAD'], text=True
+    ).strip()
+
+
 def write_json(path: Path, value: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + '.tmp')
@@ -121,6 +127,7 @@ def audit(args: argparse.Namespace) -> None:
     data = OGBenchLDPData(args.source, args.latents)
     result = {
         'upstream_commit': commit,
+        'adapter_commit': adapter_commit(),
         'source': str(data.source_path),
         'source_size_bytes': data.source_path.stat().st_size,
         **data.summary.__dict__,
@@ -146,6 +153,7 @@ def train_vae(args: argparse.Namespace) -> None:
     config = {
         'kind': 'ogbench_ldp_vae',
         'upstream_commit': commit,
+        'adapter_commit': adapter_commit(),
         'source': str(data.source_path),
         'source_size_bytes': data.source_path.stat().st_size,
         'steps': args.steps,
@@ -354,6 +362,7 @@ def encode(args: argparse.Namespace) -> None:
             destination.attrs['vae_dir'] = str(args.vae_dir.expanduser().resolve())
             destination.attrs['vae_source_size_bytes'] = vae_config['source_size_bytes']
             destination.attrs['upstream_commit'] = UPSTREAM_COMMIT
+            destination.attrs['adapter_commit'] = adapter_commit()
         temporary.replace(output)
         write_json(output.with_suffix('.vae_validation.json'), validation)
     finally:
@@ -480,6 +489,7 @@ def train_ldp(args: argparse.Namespace) -> None:
     config = {
         'kind': 'goal_conditioned_ogbench_ldp',
         'upstream_commit': commit,
+        'adapter_commit': adapter_commit(),
         'goal_conditioning': 'planner_global_condition_current_plus_final_goal',
         'idm_conditioning': 'adjacent_latent_transition_only',
         'source': str(data.source_path),
@@ -898,6 +908,8 @@ def evaluate(args: argparse.Namespace) -> None:
     result = {
         'method': 'goal_conditioned_latent_diffusion_planning',
         'upstream_commit': UPSTREAM_COMMIT,
+        'training_adapter_commit': config.get('adapter_commit'),
+        'evaluation_adapter_commit': adapter_commit(),
         'checkpoint': str(run_dir / 'checkpoint.msgpack'),
         'episodes': args.episodes,
         'seed': args.seed,
