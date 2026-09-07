@@ -87,7 +87,8 @@ prepare_python_headers() {
   if [[ -f /usr/include/python3.10/Python.h ]]; then
     return
   fi
-  local include_dir="$PYTHON_DEV_ROOT/usr/include/python3.10"
+  local include_root="$PYTHON_DEV_ROOT/usr/include"
+  local include_dir="$include_root/python3.10"
   local platform_include_dir="$PYTHON_DEV_ROOT/usr/include/x86_64-linux-gnu/python3.10"
   if [[ ! -f "$include_dir/Python.h" || ! -f "$platform_include_dir/pyconfig.h" ]]; then
     local deb_dir="$PYTHON_DEV_ROOT/debs"
@@ -104,7 +105,9 @@ prepare_python_headers() {
     echo "Failed to stage Python 3.10 development headers" >&2
     exit 2
   fi
-  export CPATH="$include_dir:$platform_include_dir${CPATH:+:$CPATH}"
+  # Python.h includes the platform header by its full relative path:
+  # <x86_64-linux-gnu/python3.10/pyconfig.h>.
+  export CPATH="$include_dir:$include_root${CPATH:+:$CPATH}"
 }
 
 dataset_path() {
