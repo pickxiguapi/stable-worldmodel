@@ -257,23 +257,11 @@ def gciql_agent(base_cls):
             self._prev_mean.copy_(mean)
             return action.clamp(-1, 1)
 
-        def _behavior_log_prob(self, z, behavior_action, task):
+        def _policy_mean(self, z, task):
             if self.cfg.multitask:
                 z = self.model.task_emb(z, task)
-            raw_mean, raw_log_std = self.model._pi(z).chunk(2, dim=-1)
-            log_std = td_math.log_std(
-                raw_log_std,
-                self.model.log_std_min,
-                self.model.log_std_dif,
-            )
-            action = behavior_action.clamp(-0.999999, 0.999999)
-            pre_tanh = 0.5 * (torch.log1p(action) - torch.log1p(-action))
-            eps = (pre_tanh - raw_mean) / log_std.exp()
-            log_prob = td_math.gaussian_logprob(eps, log_std)
-            correction = torch.log(1 - action.square() + 1e-6).sum(
-                dim=-1, keepdim=True
-            )
-            return log_prob - correction
+            raw_mean, _ = self.model._pi(z).chunk(2, dim=-1)
+            return torch.tanh(raw_mean)
 
         def update_value_and_pi(self, zs, behavior_action, task):
             rho = torch.pow(
@@ -306,12 +294,25 @@ def gciql_agent(base_cls):
             self.value_optim.zero_grad(set_to_none=True)
 
             with torch.no_grad():
-                detached_advantage = q_data - self._value(zs, task)
+                # Weight the actor with the same pre-update IQL advantage.
+                # Recomputing V after its optimizer step can transiently turn a
+                # small advantage into a large one during early joint training.
+                detached_advantage = advantage.detach()
                 awr_weight = torch.exp(
-                    self.cfg.awr_beta * detached_advantage
-                ).clamp(max=self.cfg.awr_clip)
-            log_prob = self._behavior_log_prob(zs, behavior_action, task)
-            pi_loss = -(rho * awr_weight * log_prob).mean()
+                    (self.cfg.awr_beta * detached_advantage).clamp(
+                        max=float(np.log(self.cfg.awr_clip))
+                    )
+                )
+            policy_mean = self._policy_mean(zs, task)
+            # The play dataset contains genuinely clipped actions at +/-1.
+            # A tanh-Gaussian likelihood maps those targets close to infinite
+            # pre-tanh values and explodes when TD-MPC2 initializes std near
+            # zero. Advantage-weighted action-space regression is the stable
+            # AWR/BC mean objective and matches deterministic evaluation.
+            bc_error = (policy_mean - behavior_action).square().sum(
+                dim=-1, keepdim=True
+            )
+            pi_loss = (rho * awr_weight * bc_error).mean()
             pi_loss.backward()
             pi_grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.model._pi.parameters(), self.cfg.grad_clip_norm
@@ -319,8 +320,6 @@ def gciql_agent(base_cls):
             self.pi_optim.step()
             self.pi_optim.zero_grad(set_to_none=True)
 
-            with torch.no_grad():
-                _, policy_info = self.model.pi(zs, task)
             return {
                 'value_loss': value_loss,
                 'value_grad_norm': value_grad_norm,
@@ -331,8 +330,9 @@ def gciql_agent(base_cls):
                 'awr_weight_mean': awr_weight.mean(),
                 'awr_weight_max': awr_weight.max(),
                 'pi_loss': pi_loss,
+                'pi_bc_error': bc_error.mean(),
                 'pi_grad_norm': pi_grad_norm,
-                'pi_action_norm': policy_info['mean'].norm(dim=-1).mean(),
+                'pi_action_norm': policy_mean.norm(dim=-1).mean(),
                 'behavior_action_norm': behavior_action.norm(dim=-1).mean(),
             }
 

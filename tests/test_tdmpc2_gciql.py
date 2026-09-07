@@ -102,3 +102,4 @@ def test_g3_config_and_override_contract():
     assert Agent._update is not TDMPC2._update
     assert Agent._plan is not TDMPC2._plan
     assert Agent._estimate_value is not TDMPC2._estimate_value
+    assert '_behavior_log_prob' not in Agent.__dict__
