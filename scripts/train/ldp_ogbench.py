@@ -280,7 +280,10 @@ def encode(args: argparse.Namespace) -> None:
             temporary, 'w'
         ) as destination:
             latent_ds = destination.create_dataset(
-                'latent', (rows, 64), dtype=np.float16, chunks=(4096, 64)
+                'latent',
+                (rows, 64),
+                dtype=np.float16,
+                chunks=(min(4096, rows), 64),
             )
             for start in range(0, rows, args.batch_size):
                 end = min(rows, start + args.batch_size)
