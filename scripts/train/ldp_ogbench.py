@@ -33,8 +33,8 @@ from scripts.data.ldp_ogbench_data import OGBenchLDPData, h5_take
 UPSTREAM_COMMIT = 'a26cbf1d2c0aec7adc5d9746f47831b162a41c0c'
 VAE_ARCH = {
     'act_fn': 'silu',
-    'block_out_channels': [64, 128, 256, 256],
-    'down_block_types': ['DownEncoderBlock2D'] * 4,
+    'block_out_channels': [64, 128, 256, 256, 256],
+    'down_block_types': ['DownEncoderBlock2D'] * 5,
     'in_channels': 3,
     'latent_channels': 4,
     'layers_per_block': 2,
@@ -42,7 +42,7 @@ VAE_ARCH = {
     'out_channels': 3,
     'sample_size': 64,
     'scaling_factor': 0.18215,
-    'up_block_types': ['UpDecoderBlock2D'] * 4,
+    'up_block_types': ['UpDecoderBlock2D'] * 5,
 }
 
 
