@@ -499,6 +499,8 @@ def train_ldp(args: argparse.Namespace) -> None:
         'end_learning_rate': args.end_learning_rate,
         'warmup_steps': args.warmup_steps,
         'validation_batches': args.validation_batches,
+        'validation_seed': args.seed + 1_000_003,
+        'validation_rng_isolated_from_training': True,
         'seed': args.seed,
         'planner_down_dims': [256, 512, 1024],
     }
@@ -583,17 +585,22 @@ def train_ldp(args: argparse.Namespace) -> None:
             'val_idm_loss': idm_loss,
         }
 
-    np_rng = np.random.default_rng(args.seed)
+    train_sampling_rng = np.random.default_rng(args.seed)
+    validation_sampling_rng = np.random.default_rng(args.seed + 1_000_003)
+    train_rng, validation_rng = jax.random.split(rng)
     started = time.time()
     metrics_path = output / 'metrics.jsonl'
     for step in range(1, args.steps + 1):
         batch = data.sample_windows(
-            np_rng, args.batch_size, args.pred_horizon, split='train'
+            train_sampling_rng,
+            args.batch_size,
+            args.pred_horizon,
+            split='train',
         )
         current = normalize(batch['current'], data.latent_min, data.latent_max)
         future = normalize(batch['future'], data.latent_min, data.latent_max)
         goal = normalize(batch['goal'], data.latent_min, data.latent_max)
-        rng, update_rng = jax.random.split(rng)
+        train_rng, update_rng = jax.random.split(train_rng)
         params, opt_state, metrics = update(
             params,
             opt_state,
@@ -607,7 +614,10 @@ def train_ldp(args: argparse.Namespace) -> None:
             validation_records = []
             for _ in range(args.validation_batches):
                 val_batch = data.sample_windows(
-                    np_rng, args.batch_size, args.pred_horizon, split='val'
+                    validation_sampling_rng,
+                    args.batch_size,
+                    args.pred_horizon,
+                    split='val',
                 )
                 val_current = normalize(
                     val_batch['current'], data.latent_min, data.latent_max
@@ -618,7 +628,9 @@ def train_ldp(args: argparse.Namespace) -> None:
                 val_goal = normalize(
                     val_batch['goal'], data.latent_min, data.latent_max
                 )
-                rng, validation_rng = jax.random.split(rng)
+                validation_rng, validation_batch_rng = jax.random.split(
+                    validation_rng
+                )
                 validation_records.append(
                     validation_loss(
                         params,
@@ -626,7 +638,7 @@ def train_ldp(args: argparse.Namespace) -> None:
                         val_future,
                         val_goal,
                         val_batch['actions'],
-                        validation_rng,
+                        validation_batch_rng,
                     )
                 )
             validation_metrics = {
