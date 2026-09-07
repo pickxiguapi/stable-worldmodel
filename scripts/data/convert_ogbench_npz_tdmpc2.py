@@ -245,7 +245,16 @@ def validate(
     """Validate the training contract and print a compact summary."""
     path = path.expanduser().resolve()
     with h5py.File(path, 'r') as dataset:
-        required = {'pixels', 'action', 'reward', 'ep_len', 'ep_offset'}
+        required = {
+            'pixels',
+            'action',
+            'reward',
+            'terminal',
+            'ep_len',
+            'ep_offset',
+            'source_episode',
+            'source_step',
+        }
         missing = sorted(required - set(dataset.keys()))
         if missing:
             raise ValueError(f'{path} is missing datasets: {missing}')
@@ -259,15 +268,41 @@ def validate(
         lengths = dataset['ep_len'][:]
         offsets = dataset['ep_offset'][:]
         rows = int(dataset['pixels'].shape[0])
-        if (
-            dataset['action'].shape[0] != rows
-            or dataset['reward'].shape[0] != rows
-        ):
-            raise ValueError('pixels/action/reward row counts differ')
+        row_datasets = (
+            'action',
+            'reward',
+            'terminal',
+            'source_episode',
+            'source_step',
+        )
+        mismatched = {
+            key: int(dataset[key].shape[0])
+            for key in row_datasets
+            if dataset[key].shape[0] != rows
+        }
+        if mismatched:
+            raise ValueError(
+                f'Row counts differ from pixels={rows}: {mismatched}'
+            )
         if dataset['pixels'].ndim != 4 or dataset['pixels'].shape[-1] != 3:
             raise ValueError('pixels must be HWC RGB images')
         if dataset['pixels'].dtype != np.uint8:
             raise ValueError('pixels must use uint8 storage')
+        if dataset['action'].ndim != 2:
+            raise ValueError('action must have shape [rows, action_dim]')
+        for key in ('reward', 'terminal', 'source_episode', 'source_step'):
+            if dataset[key].ndim != 1:
+                raise ValueError(f'{key} must be one-dimensional')
+        if dataset.attrs.get('format') != 'ogbench_goal_tdmpc2_pixels_v1':
+            raise ValueError('Unexpected or missing TD-MPC2 dataset format')
+        if dataset.attrs.get('observation') != 'pixels_only_rgb':
+            raise ValueError('Dataset is not marked pixels-only RGB')
+        if not np.issubdtype(lengths.dtype, np.integer):
+            raise ValueError('ep_len must use an integer dtype')
+        if not np.issubdtype(offsets.dtype, np.integer):
+            raise ValueError('ep_offset must use an integer dtype')
+        if len(lengths) == 0 or len(offsets) != len(lengths):
+            raise ValueError('ep_len/ep_offset must describe at least one segment')
         if int(lengths.sum()) != rows:
             raise ValueError('ep_len does not sum to the stored row count')
         expected_offsets = np.concatenate(
@@ -290,6 +325,8 @@ def validate(
 
         goal_rows = offsets + lengths - 1
         rewards = dataset['reward'][:]
+        if not np.isfinite(rewards).all():
+            raise ValueError('Rewards contain NaN or Inf')
         expected_reward_rows = goal_rows - 1
         nonzero = np.flatnonzero(rewards)
         if not np.array_equal(nonzero, expected_reward_rows):
@@ -298,10 +335,61 @@ def validate(
             )
         if not np.all(rewards[nonzero] == 1.0):
             raise ValueError('Goal rewards must be +1')
+        terminals = dataset['terminal'][:].astype(bool, copy=False)
+        terminal_rows = np.flatnonzero(terminals)
+        if not np.array_equal(terminal_rows, goal_rows):
+            raise ValueError('Terminals are not exactly on final goal observations')
         actions = dataset['action'][:]
+        if not np.isfinite(actions).all():
+            raise ValueError('Stored actions contain NaN or Inf')
         action_min, action_max = float(actions.min()), float(actions.max())
         if action_min < -1.0001 or action_max > 1.0001:
             raise ValueError('Stored actions are outside [-1, 1]')
+        if not np.all(actions[goal_rows] == 0.0):
+            raise ValueError('Final observation rows must have zero dummy actions')
+
+        source_episode = dataset['source_episode'][:]
+        source_step = dataset['source_step'][:]
+        expected_source_step = np.concatenate(
+            [np.arange(length, dtype=source_step.dtype) for length in lengths]
+        )
+        if not np.array_equal(source_step, expected_source_step):
+            raise ValueError('source_step does not reset/increment per segment')
+        segment_source_episode = source_episode[offsets]
+        expected_source_episode = np.repeat(segment_source_episode, lengths)
+        if not np.array_equal(source_episode, expected_source_episode):
+            raise ValueError('source_episode changes inside a segment')
+        if np.any(segment_source_episode < 0) or np.any(
+            np.diff(segment_source_episode) < 0
+        ):
+            raise ValueError('source_episode IDs must be nonnegative and ordered')
+
+        # Probe all structural boundary types across the full file. Reading these
+        # rows also makes HDF5 decompress representative pixel chunks, catching
+        # truncated/corrupt image payloads without loading tens of GiB at once.
+        probe_episode_ids = np.unique(
+            np.linspace(
+                0,
+                len(lengths) - 1,
+                num=min(512, len(lengths)),
+                dtype=np.int64,
+            )
+        )
+        probe_rows = np.unique(
+            np.concatenate(
+                (
+                    offsets[probe_episode_ids],
+                    expected_reward_rows[probe_episode_ids],
+                    goal_rows[probe_episode_ids],
+                )
+            )
+        )
+        pixel_probe = dataset['pixels'][probe_rows]
+        pixel_probe_min = int(pixel_probe.min())
+        pixel_probe_max = int(pixel_probe.max())
+        pixel_probe_std = float(pixel_probe.std())
+        if pixel_probe_min == pixel_probe_max or pixel_probe_std == 0.0:
+            raise ValueError('Representative pixel rows are constant/collapsed')
 
         summary: dict[str, int | float | str] = {
             'path': str(path),
@@ -312,8 +400,13 @@ def validate(
             'min_episode_rows': int(lengths.min()),
             'max_episode_rows': int(lengths.max()),
             'positive_rewards': len(nonzero),
+            'terminals': len(terminal_rows),
+            'source_episodes': int(segment_source_episode.max()) + 1,
             'action_min': action_min,
             'action_max': action_max,
+            'pixel_probe_min': pixel_probe_min,
+            'pixel_probe_max': pixel_probe_max,
+            'pixel_probe_std': round(pixel_probe_std, 4),
         }
     print(
         'VALID ' + ' '.join(f'{key}={value}' for key, value in summary.items())
