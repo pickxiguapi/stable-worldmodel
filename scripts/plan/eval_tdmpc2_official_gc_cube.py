@@ -32,6 +32,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--max-episode-steps', type=int, default=50)
     parser.add_argument('--reward-task-id', type=int, default=2)
+    parser.add_argument(
+        '--visualize-info', action=argparse.BooleanOptionalAction, default=True
+    )
     return parser.parse_args()
 
 
@@ -46,6 +49,15 @@ def gc_observation(observation: np.ndarray, goal: np.ndarray) -> torch.Tensor:
         )
     pair = np.concatenate([observation, goal], axis=-1)
     return torch.from_numpy(pair.transpose(2, 0, 1).copy()).cuda()
+
+
+def cube_goal_distance(env) -> float:
+    """Return privileged cube-to-goal distance for evaluation diagnostics."""
+    unwrapped = env.unwrapped
+    cube_pos = unwrapped._data.joint('object_joint_0').qpos[:3]
+    target_id = unwrapped._cube_target_mocap_ids[0]
+    target_pos = unwrapped._data.mocap_pos[target_id]
+    return float(np.linalg.norm(cube_pos - target_pos))
 
 
 def main() -> None:
@@ -86,11 +98,16 @@ def main() -> None:
         width=64,
         reward_task_id=args.reward_task_id,
         terminate_at_goal=True,
+        visualize_info=args.visualize_info,
     )
     env.unwrapped._render_goal = False
     successes: list[bool] = []
     returns: list[float] = []
     lengths: list[int] = []
+    initial_distances: list[float] = []
+    final_distances: list[float] = []
+    minimum_distances: list[float] = []
+    mean_action_norms: list[float] = []
     started = time.time()
     try:
         for episode in range(args.episodes):
@@ -99,15 +116,20 @@ def main() -> None:
             episode_return = 0.0
             success = bool(info.get('success', False))
             length = 0
+            initial_distance = cube_goal_distance(env)
+            minimum_distance = initial_distance
+            action_norms: list[float] = []
             for step in range(args.max_episode_steps):
                 obs = gc_observation(observation, goal)
                 with torch.inference_mode():
                     action = agent.act(
                         obs, t0=(step == 0), eval_mode=True
                     ).numpy()
+                action_norms.append(float(np.linalg.norm(action)))
                 observation, reward, terminated, truncated, info = env.step(
                     np.clip(action, -1.0, 1.0)
                 )
+                minimum_distance = min(minimum_distance, cube_goal_distance(env))
                 episode_return += float(reward)
                 success = success or bool(info.get('success', False))
                 length = step + 1
@@ -116,9 +138,18 @@ def main() -> None:
             successes.append(success)
             returns.append(episode_return)
             lengths.append(length)
+            final_distance = cube_goal_distance(env)
+            initial_distances.append(initial_distance)
+            final_distances.append(final_distance)
+            minimum_distances.append(minimum_distance)
+            mean_action_norms.append(float(np.mean(action_norms)))
             print(
                 f'EPISODE episode={episode + 1} success={int(success)} '
-                f'return={episode_return:.6f} length={length}',
+                f'return={episode_return:.6f} length={length} '
+                f'initial_distance={initial_distance:.6f} '
+                f'final_distance={final_distance:.6f} '
+                f'min_distance={minimum_distance:.6f} '
+                f'mean_action_norm={mean_action_norms[-1]:.6f}',
                 flush=True,
             )
     finally:
@@ -134,12 +165,17 @@ def main() -> None:
         'episode_successes': successes,
         'episode_returns': returns,
         'episode_lengths': lengths,
+        'initial_cube_goal_distances': initial_distances,
+        'final_cube_goal_distances': final_distances,
+        'minimum_cube_goal_distances': minimum_distances,
+        'mean_action_norms': mean_action_norms,
         'elapsed_seconds': time.time() - started,
         'environment': {
             'id': 'swm/OGBCube-v0',
             'env_type': 'single',
             'reward_task_id': args.reward_task_id,
             'max_episode_steps': args.max_episode_steps,
+            'visualize_info': args.visualize_info,
         },
         'planner': {
             'name': 'official_tdmpc2_mppi',

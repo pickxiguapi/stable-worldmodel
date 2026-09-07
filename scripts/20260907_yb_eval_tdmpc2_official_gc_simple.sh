@@ -21,6 +21,7 @@ TRAIN_SEED=${TRAIN_SEED:-1}
 EPISODES=${EPISODES:-10}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
 EVAL_SEED=${EVAL_SEED:-42}
+VISUALIZE_INFO=${VISUALIZE_INFO:-1}
 GPU_IDS=${GPU_IDS:-"0 1"}
 GPU_MEMORY_LIMIT_MIB=${GPU_MEMORY_LIMIT_MIB:-500}
 
@@ -97,6 +98,10 @@ run_one() {
   local checkpoint
   checkpoint=$(checkpoint_path "$TASK_INDEX")
   local output_dir="$EVAL_ROOT/$EVAL_LABEL/${labels[$TASK_INDEX]}"
+  local visualize_arg=--visualize-info
+  if [[ "$VISUALIZE_INFO" == 0 ]]; then
+    visualize_arg=--no-visualize-info
+  fi
   mkdir -p "$EVAL_ROOT/$EVAL_LABEL"
   if [[ -e "$output_dir" ]]; then
     echo "Refusing to reuse evaluation directory: $output_dir" >&2
@@ -112,6 +117,7 @@ run_one() {
     --episodes "$EPISODES" \
     --seed "$EVAL_SEED" \
     --max-episode-steps "$MAX_EPISODE_STEPS" \
+    "$visualize_arg" \
     2>&1 | tee "$EVAL_ROOT/$EVAL_LABEL/${labels[$TASK_INDEX]}.log"
 }
 
@@ -133,7 +139,7 @@ launch() {
   for i in "${!tags[@]}"; do
     local session="eval_official_tdmpc2_${labels[$i]}_${EVAL_LABEL}"
     tmux new-session -d -s "${session:0:90}" \
-      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' RUN_ROOT='$RUN_ROOT' EVAL_ROOT='$EVAL_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' OGBENCH_SITE_PACKAGES='$OGBENCH_SITE_PACKAGES' EGL_RUNTIME_ROOT='$EGL_RUNTIME_ROOT' TRAIN_LABEL='$TRAIN_LABEL' EVAL_LABEL='$EVAL_LABEL' MAX_STEPS='$MAX_STEPS' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' TRAIN_SEED='$TRAIN_SEED' EPISODES='$EPISODES' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' EVAL_SEED='$EVAL_SEED' bash '$STABLEWM_ROOT/scripts/20260907_yb_eval_tdmpc2_official_gc_simple.sh'"
+      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' RUN_ROOT='$RUN_ROOT' EVAL_ROOT='$EVAL_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' OGBENCH_SITE_PACKAGES='$OGBENCH_SITE_PACKAGES' EGL_RUNTIME_ROOT='$EGL_RUNTIME_ROOT' TRAIN_LABEL='$TRAIN_LABEL' EVAL_LABEL='$EVAL_LABEL' MAX_STEPS='$MAX_STEPS' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' TRAIN_SEED='$TRAIN_SEED' EPISODES='$EPISODES' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' EVAL_SEED='$EVAL_SEED' VISUALIZE_INFO='$VISUALIZE_INFO' bash '$STABLEWM_ROOT/scripts/20260907_yb_eval_tdmpc2_official_gc_simple.sh'"
     echo "Launched ${labels[$i]} on physical GPU ${gpus[$i]}"
   done
 }
