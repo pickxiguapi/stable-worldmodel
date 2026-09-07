@@ -10,6 +10,7 @@ STABLEWM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 MODE=${MODE:-status}
 PYTHON_BIN=${PYTHON_BIN:-/root/data/yyf/ogbench-new/.venv/bin/python}
 TEST_PYTHON_BIN=${TEST_PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
+OVERLAY_INSTALLER_BIN=${OVERLAY_INSTALLER_BIN:-/usr/bin/python3.10}
 ENV_SPEC=${ENV_SPEC:-$STABLEWM_ROOT/scripts/config/ldp_ogbench_env_spec.json}
 SOURCE_DATASET=${SOURCE_DATASET:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50/visual-cube-single-play-v0.h5}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/root/data/yyf/ldp-ogbench}
@@ -139,8 +140,8 @@ setup_env() {
     echo "Read-only OGBench JAX environment is missing: $PYTHON_BIN" >&2
     exit 2
   fi
-  if [[ ! -x "$TEST_PYTHON_BIN" ]]; then
-    echo "Overlay installer environment is missing: $TEST_PYTHON_BIN" >&2
+  if [[ ! -x "$OVERLAY_INSTALLER_BIN" ]]; then
+    echo "Overlay installer Python is missing: $OVERLAY_INSTALLER_BIN" >&2
     exit 2
   fi
   if [[ ! -d "$WHEELHOUSE" ]]; then
@@ -157,7 +158,7 @@ setup_env() {
     rm -rf "$temporary"
   fi
   mkdir -p "$temporary/site-packages"
-  "$TEST_PYTHON_BIN" -m pip install --no-index --no-deps \
+  "$OVERLAY_INSTALLER_BIN" -m pip install --no-index --no-deps \
     --find-links "$WHEELHOUSE" --target "$temporary/site-packages" \
     'diffusers==0.27.2' 'huggingface-hub==0.23.1' \
     'filelock==3.19.1' 'importlib-metadata==8.7.0' \
