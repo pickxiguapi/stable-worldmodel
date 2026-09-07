@@ -1,10 +1,8 @@
-"""Goal-conditioned offline RL using the unmodified official TD-MPC2 core.
+"""Goal-conditioned offline RL built on the pinned official TD-MPC2 core.
 
 The official source is pinned as ``third_party/tdmpc2``. This driver adapts
-only the data boundary: each observation is concatenated with the final image
-from its hindsight-goal segment, producing a 6-channel RGB observation. The
-official encoder, losses, optimizers, target critic, RunningScale, and planner
-remain untouched.
+the data boundary and adds a behavior-cloning loss to the actor. The official
+MPPI proposal, policy candidates, trajectory scores, and update remain intact.
 """
 
 from __future__ import annotations
@@ -21,10 +19,12 @@ from pathlib import Path
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 
 OFFICIAL_COMMIT = 'e9f59321933cbc8e11a002b842adc7d4ffae8ff1'
+REWARD_SCHEME = 'negative_step_goal_zero_v2'
 MODEL_SIZES = {
     1: {
         'enc_dim': 256,
@@ -67,6 +67,165 @@ def load_official_agent(repo_root: Path):
     return TDMPC2, cfg_to_dataclass, commit
 
 
+def offline_constrained_agent(base_cls):
+    """Add TD-M(PC)^2-style actor BC without modifying MPPI."""
+    from common import math as td_math
+
+    class OfflineConstrainedTDMPC2(base_cls):
+        def update_pi(self, zs, behavior_action, task):
+            policy_action, info = self.model.pi(zs, task)
+            qs = self.model.Q(
+                zs, policy_action, task, return_type='avg', detach=True
+            )
+            self.scale.update(qs[0])
+            qs = self.scale(qs)
+
+            rho = torch.pow(
+                self.cfg.rho, torch.arange(len(qs), device=self.device)
+            )
+            q_loss = (
+                -(
+                    self.cfg.entropy_coef * info['scaled_entropy'] + qs
+                ).mean(dim=(1, 2))
+                * rho
+            ).mean()
+            bc_loss = (
+                (policy_action - behavior_action)
+                .square()
+                .sum(dim=-1)
+                .mean(dim=1)
+                * rho
+            ).mean()
+            pi_loss = q_loss + self.cfg.actor_bc_coef * bc_loss
+            pi_loss.backward()
+            pi_grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model._pi.parameters(), self.cfg.grad_clip_norm
+            )
+            self.pi_optim.step()
+            self.pi_optim.zero_grad(set_to_none=True)
+
+            return {
+                'pi_loss': pi_loss,
+                'pi_q_loss': q_loss,
+                'pi_bc_loss': bc_loss,
+                'pi_grad_norm': pi_grad_norm,
+                'pi_entropy': info['entropy'],
+                'pi_scaled_entropy': info['scaled_entropy'],
+                'pi_scale': self.scale.value,
+                'pi_action_norm': policy_action.norm(dim=-1).mean(),
+                'behavior_action_norm': behavior_action.norm(dim=-1).mean(),
+            }
+
+        def _update(self, obs, action, reward, terminated, task=None):
+            with torch.no_grad():
+                next_z = self.model.encode(obs[1:], task)
+                td_targets = self._td_target(next_z, reward, terminated, task)
+
+            self.model.train()
+            zs = torch.empty(
+                self.cfg.horizon + 1,
+                self.cfg.batch_size,
+                self.cfg.latent_dim,
+                device=self.device,
+            )
+            z = self.model.encode(obs[0], task)
+            zs[0] = z
+            consistency_loss = 0
+            for t, (_action, _next_z) in enumerate(
+                zip(action.unbind(0), next_z.unbind(0))
+            ):
+                z = self.model.next(z, _action, task)
+                consistency_loss = (
+                    consistency_loss
+                    + F.mse_loss(z, _next_z) * self.cfg.rho**t
+                )
+                zs[t + 1] = z
+
+            rollout_zs = zs[:-1]
+            qs = self.model.Q(rollout_zs, action, task, return_type='all')
+            reward_preds = self.model.reward(rollout_zs, action, task)
+            if self.cfg.episodic:
+                termination_pred = self.model.termination(
+                    zs[1:], task, unnormalized=True
+                )
+
+            reward_loss, value_loss = 0, 0
+            for t, (
+                reward_pred,
+                reward_target,
+                td_target,
+                timestep_qs,
+            ) in enumerate(
+                zip(
+                    reward_preds.unbind(0),
+                    reward.unbind(0),
+                    td_targets.unbind(0),
+                    qs.unbind(1),
+                )
+            ):
+                reward_loss = reward_loss + td_math.soft_ce(
+                    reward_pred, reward_target, self.cfg
+                ).mean() * self.cfg.rho**t
+                for q_pred in timestep_qs.unbind(0):
+                    value_loss = value_loss + td_math.soft_ce(
+                        q_pred, td_target, self.cfg
+                    ).mean() * self.cfg.rho**t
+
+            consistency_loss = consistency_loss / self.cfg.horizon
+            reward_loss = reward_loss / self.cfg.horizon
+            if self.cfg.episodic:
+                termination_loss = F.binary_cross_entropy_with_logits(
+                    termination_pred, terminated
+                )
+            else:
+                termination_loss = 0.0
+            value_loss = value_loss / (
+                self.cfg.horizon * self.cfg.num_q
+            )
+            total_loss = (
+                self.cfg.consistency_coef * consistency_loss
+                + self.cfg.reward_coef * reward_loss
+                + self.cfg.termination_coef * termination_loss
+                + self.cfg.value_coef * value_loss
+            )
+
+            total_loss.backward()
+            grad_norm = torch.nn.utils.clip_grad_norm_(
+                self.model.parameters(), self.cfg.grad_clip_norm
+            )
+            self.optim.step()
+            self.optim.zero_grad(set_to_none=True)
+
+            pi_info = self.update_pi(
+                rollout_zs.detach(), action.detach(), task
+            )
+            self.model.soft_update_target_Q()
+            self.model.eval()
+            info = {
+                'consistency_loss': consistency_loss,
+                'reward_loss': reward_loss,
+                'value_loss': value_loss,
+                'termination_loss': termination_loss,
+                'total_loss': total_loss,
+                'grad_norm': grad_norm,
+            }
+            if self.cfg.episodic:
+                info.update(
+                    td_math.termination_statistics(
+                        torch.sigmoid(termination_pred[-1]), terminated[-1]
+                    )
+                )
+            info.update(pi_info)
+            return {
+                key: value.detach().mean()
+                if isinstance(value, torch.Tensor)
+                else torch.tensor(value)
+                for key, value in info.items()
+            }
+
+    return OfflineConstrainedTDMPC2
+
+
 @dataclass(frozen=True)
 class RunConfig:
     dataset: str
@@ -78,6 +237,7 @@ class RunConfig:
     horizon: int
     segment_transitions: int
     model_size: int
+    actor_bc_coef: float
     episodic: bool
     compile: bool
     log_interval: int
@@ -123,6 +283,12 @@ class GoalConditionedH5Replay:
                     'Dataset goal horizon mismatch: '
                     f'expected {expected_segment_transitions}, '
                     f'found {stored_horizon}'
+                )
+            reward_scheme = dataset.attrs.get('reward_scheme')
+            if reward_scheme != REWARD_SCHEME:
+                raise ValueError(
+                    f'Expected reward_scheme={REWARD_SCHEME}, '
+                    f'found {reward_scheme}'
                 )
             if dataset['pixels'].dtype != np.uint8:
                 raise ValueError('pixels must be uint8')
@@ -259,13 +425,14 @@ def build_official_config(args, action_dim, cfg_to_dataclass):
         'min_std': 0.05,
         'max_std': 2.0,
         'temperature': 0.5,
+        'actor_bc_coef': args.actor_bc_coef,
         # official actor/critic/architecture defaults
         'log_std_min': -10,
         'log_std_max': 2,
         'entropy_coef': 1e-4,
         'num_bins': 101,
-        'vmin': -10,
-        'vmax': 10,
+        'vmin': -20,
+        'vmax': 0,
         'bin_size': 0.2,
         'model_size': args.model_size,
         'num_channels': 32,
@@ -320,6 +487,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--horizon', type=int, default=3)
     parser.add_argument('--segment-transitions', type=int, default=50)
     parser.add_argument('--model-size', type=int, default=5)
+    parser.add_argument('--actor-bc-coef', type=float, default=1.0)
     parser.add_argument('--seed', type=int, default=1)
     parser.add_argument('--log-interval', type=int, default=100)
     parser.add_argument('--checkpoint-interval', type=int, default=10_000)
@@ -338,6 +506,8 @@ def main() -> None:
         raise RuntimeError('Official TD-MPC2 requires CUDA')
     if args.horizon < 1 or args.steps < 1 or args.batch_size < 1:
         raise ValueError('horizon, steps, and batch-size must be positive')
+    if args.actor_bc_coef < 0:
+        raise ValueError('actor-bc-coef must be nonnegative')
 
     repo_root = Path(__file__).resolve().parents[2]
     TDMPC2, cfg_to_dataclass, official_commit = load_official_agent(repo_root)
@@ -369,6 +539,7 @@ def main() -> None:
         horizon=args.horizon,
         segment_transitions=args.segment_transitions,
         model_size=args.model_size,
+        actor_bc_coef=args.actor_bc_coef,
         episodic=args.episodic,
         compile=args.compile,
         log_interval=args.log_interval,
@@ -382,11 +553,15 @@ def main() -> None:
         json.dumps(asdict(cfg), indent=2) + '\n'
     )
 
-    agent = TDMPC2(cfg)
+    Agent = offline_constrained_agent(TDMPC2)
+    agent = Agent(cfg)
     print(
         f'OFFICIAL_TDMPC2 commit={official_commit} '
         f'model_size={args.model_size}M goal_conditioning=rgb_concat '
-        f'offline_rl=true terminal_masking={args.episodic}',
+        f'offline_rl=true reward_scheme={REWARD_SCHEME} '
+        f'actor_bc_coef={args.actor_bc_coef} '
+        f'mppi=official_unmodified '
+        f'terminal_masking={args.episodic}',
         flush=True,
     )
     started = time.time()

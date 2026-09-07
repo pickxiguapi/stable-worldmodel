@@ -5,11 +5,10 @@ and privileged simulator state.  This converter deliberately stores only
 RGB pixels, actions, and derived rewards; qpos/qvel/button states are neither
 read nor written, so the resulting training input is vision-only.
 
-Long OGBench episodes are split into fixed-length future-goal segments.  The
+Long OGBench episodes are split into fixed-length future-goal segments. The
 last image in each segment is the goal used by ``scripts/train/tdmpc2.py``;
-the transition entering it receives reward +1 and all earlier transitions
-receive reward 0.  This makes the sparse goal reward learnable without
-changing TD-MPC2's model, optimizer, or loss defaults.
+the transition entering it receives reward 0 and all earlier transitions
+receive reward -1. This is a shortest-path reward for goal reaching.
 """
 
 from __future__ import annotations
@@ -22,6 +21,7 @@ import h5py
 import numpy as np
 
 REQUIRED_KEYS = ('observations', 'actions', 'terminals')
+REWARD_SCHEME = 'negative_step_goal_zero_v2'
 
 
 def episode_bounds(terminals: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -200,10 +200,11 @@ def convert(
             output.create_dataset('ep_len', data=lengths)
             output.create_dataset('ep_offset', data=offsets)
 
-            reward_ds[:] = 0.0
+            reward_ds[:] = -1.0
             terminal_ds[:] = False
             goal_rows = offsets + lengths - 1
-            reward_ds[goal_rows - 1] = 1.0
+            reward_ds[goal_rows - 1] = 0.0
+            reward_ds[goal_rows] = 0.0  # Dummy final-observation slots.
             terminal_ds[goal_rows] = True
 
             for out_start in range(0, output_rows, block_rows):
@@ -229,6 +230,7 @@ def convert(
                 episode_bounds(terminals)[0]
             )
             output.attrs['observation'] = 'pixels_only_rgb'
+            output.attrs['reward_scheme'] = REWARD_SCHEME
             output.flush()
         os.replace(temp, dest)
     except BaseException:
@@ -339,14 +341,24 @@ def validate(
         rewards = dataset['reward'][:]
         if not np.isfinite(rewards).all():
             raise ValueError('Rewards contain NaN or Inf')
-        expected_reward_rows = goal_rows - 1
-        nonzero = np.flatnonzero(rewards)
-        if not np.array_equal(nonzero, expected_reward_rows):
+        if dataset.attrs.get('reward_scheme') != REWARD_SCHEME:
             raise ValueError(
-                'Rewards are not exactly on goal-entering transitions'
+                f'Expected reward_scheme={REWARD_SCHEME}, found '
+                f'{dataset.attrs.get("reward_scheme")}'
             )
-        if not np.all(rewards[nonzero] == 1.0):
-            raise ValueError('Goal rewards must be +1')
+        expected_goal_reward_rows = goal_rows - 1
+        expected_zero_rows = np.sort(
+            np.concatenate((expected_goal_reward_rows, goal_rows))
+        )
+        zero_rows = np.flatnonzero(rewards == 0.0)
+        if not np.array_equal(zero_rows, expected_zero_rows):
+            raise ValueError(
+                'Zero rewards are not exactly on goal transitions/dummy rows'
+            )
+        step_mask = np.ones(rows, dtype=bool)
+        step_mask[expected_zero_rows] = False
+        if not np.all(rewards[step_mask] == -1.0):
+            raise ValueError('All non-goal transition rewards must be -1')
         terminals = dataset['terminal'][:].astype(bool, copy=False)
         terminal_rows = np.flatnonzero(terminals)
         if not np.array_equal(terminal_rows, goal_rows):
@@ -391,7 +403,7 @@ def validate(
             np.concatenate(
                 (
                     offsets[probe_episode_ids],
-                    expected_reward_rows[probe_episode_ids],
+                    expected_goal_reward_rows[probe_episode_ids],
                     goal_rows[probe_episode_ids],
                 )
             )
@@ -455,7 +467,9 @@ def validate(
             'action_dim': int(dataset['action'].shape[1]),
             'min_episode_rows': int(lengths.min()),
             'max_episode_rows': int(lengths.max()),
-            'positive_rewards': len(nonzero),
+            'negative_step_rewards': int(step_mask.sum()),
+            'zero_goal_transition_rewards': len(expected_goal_reward_rows),
+            'zero_dummy_rewards': len(goal_rows),
             'terminals': len(terminal_rows),
             'source_episodes': int(segment_source_episode.max()) + 1,
             'action_min': action_min,
@@ -469,6 +483,25 @@ def validate(
         'VALID ' + ' '.join(f'{key}={value}' for key, value in summary.items())
     )
     return summary
+
+
+def migrate_reward_scheme(path: Path) -> None:
+    """Rewrite only derived rewards in an existing v1 HDF5 file."""
+    path = path.expanduser().resolve()
+    with h5py.File(path, 'r+') as dataset:
+        lengths = dataset['ep_len'][:].astype(np.int64, copy=False)
+        offsets = dataset['ep_offset'][:].astype(np.int64, copy=False)
+        rows = int(dataset['reward'].shape[0])
+        goal_rows = offsets + lengths - 1
+        goal_transition_rows = goal_rows - 1
+        rewards = np.full(rows, -1.0, dtype=np.float32)
+        rewards[goal_transition_rows] = 0.0
+        rewards[goal_rows] = 0.0
+        dataset['reward'][:] = rewards
+        dataset.attrs['reward_scheme'] = REWARD_SCHEME
+        dataset.flush()
+    validate(path)
+    print(f'MIGRATED_REWARD path={path} scheme={REWARD_SCHEME}', flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -487,6 +520,9 @@ def parse_args() -> argparse.Namespace:
     validate_parser.add_argument('paths', nargs='+', type=Path)
     validate_parser.add_argument('--segment-transitions', type=int)
     validate_parser.add_argument('--verify-source', action='store_true')
+
+    migrate_parser = subparsers.add_parser('migrate-reward')
+    migrate_parser.add_argument('paths', nargs='+', type=Path)
     return parser.parse_args()
 
 
@@ -501,9 +537,12 @@ def main() -> None:
             block_rows=args.block_rows,
             overwrite=args.overwrite,
         )
-    else:
+    elif args.command == 'validate':
         for path in args.paths:
             validate(path, args.segment_transitions, args.verify_source)
+    else:
+        for path in args.paths:
+            migrate_reward_scheme(path)
 
 
 if __name__ == '__main__':

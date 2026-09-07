@@ -19,7 +19,10 @@ import torch
 from omegaconf import OmegaConf
 
 import stable_worldmodel  # noqa: F401  # registers swm/* environments
-from scripts.train.tdmpc2_official_gc import load_official_agent
+from scripts.train.tdmpc2_official_gc import (
+    load_official_agent,
+    offline_constrained_agent,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--max-episode-steps', type=int, default=50)
     parser.add_argument('--reward-task-id', type=int, default=2)
     parser.add_argument(
-        '--visualize-info', action=argparse.BooleanOptionalAction, default=True
+        '--visualize-info', action=argparse.BooleanOptionalAction, default=False
     )
     return parser.parse_args()
 
@@ -81,7 +84,8 @@ def main() -> None:
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     torch.set_float32_matmul_precision('high')
-    agent = TDMPC2(cfg)
+    Agent = offline_constrained_agent(TDMPC2)
+    agent = Agent(cfg)
     payload = torch.load(checkpoint, map_location='cuda:0', weights_only=False)
     agent.load(payload)
     agent.eval()

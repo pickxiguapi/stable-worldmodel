@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Yingbo Cloud: official TD-MPC2 core + goal-conditioned offline OGBench.
+# Yingbo Cloud: actor-BC TD-MPC2 + goal-conditioned offline OGBench.
 # Every validation, smoke, training, and wait operation is routed here.
 
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -12,13 +12,14 @@ PYTHON_BIN=${PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
 DATASET_ROOT=${DATASET_ROOT:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50}
 RUN_ROOT=${RUN_ROOT:-/root/data/yyf/tdmpc2-official-gc-ogbench8-runs}
 PYTHON_DEV_ROOT=${PYTHON_DEV_ROOT:-$RUN_ROOT/.runtime/python-dev}
-RUN_LABEL=${RUN_LABEL:-official_e9f5932_gc_h50_ms100000_s1}
+RUN_LABEL=${RUN_LABEL:-neg1zero_actorbc1_mppi_original}
 OFFICIAL_COMMIT=${OFFICIAL_COMMIT:-e9f59321933cbc8e11a002b842adc7d4ffae8ff1}
 SEGMENT_TRANSITIONS=${SEGMENT_TRANSITIONS:-50}
 MAX_STEPS=${MAX_STEPS:-100000}
 BATCH_SIZE=${BATCH_SIZE:-256}
 HORIZON=${HORIZON:-3}
 MODEL_SIZE=${MODEL_SIZE:-5}
+ACTOR_BC_COEF=${ACTOR_BC_COEF:-1.0}
 SEED=${SEED:-1}
 LOG_INTERVAL=${LOG_INTERVAL:-100}
 CHECKPOINT_INTERVAL=${CHECKPOINT_INTERVAL:-10000}
@@ -146,6 +147,15 @@ audit_data() {
   done
 }
 
+migrate_rewards() {
+  check_official_source
+  local converter="$STABLEWM_ROOT/scripts/data/convert_ogbench_npz_tdmpc2.py"
+  for i in "${!envs[@]}"; do
+    "$PYTHON_BIN" "$converter" migrate-reward "$(dataset_path "$i")"
+  done
+  audit_data
+}
+
 unit_test() {
   check_official_source
   cd "$STABLEWM_ROOT"
@@ -203,6 +213,7 @@ run_one() {
     --horizon "$HORIZON" \
     --segment-transitions "$SEGMENT_TRANSITIONS" \
     --model-size "$MODEL_SIZE" \
+    --actor-bc-coef "$ACTOR_BC_COEF" \
     --seed "$SEED" \
     --log-interval "$LOG_INTERVAL" \
     --checkpoint-interval "$CHECKPOINT_INTERVAL" \
@@ -224,6 +235,7 @@ smoke() {
     OFFICIAL_COMMIT="$OFFICIAL_COMMIT" SEGMENT_TRANSITIONS="$SEGMENT_TRANSITIONS" \
     RUN_LABEL="smoke_${stamp}" MAX_STEPS=2 BATCH_SIZE=8 HORIZON="$HORIZON" \
     MODEL_SIZE="$MODEL_SIZE" SEED="$SEED" LOG_INTERVAL=1 CHECKPOINT_INTERVAL=2 \
+    ACTOR_BC_COEF="$ACTOR_BC_COEF" \
     COMPILE="$COMPILE" \
     bash "$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh"
 }
@@ -256,7 +268,7 @@ launch_all() {
       exit 4
     fi
     tmux new-session -d -s "$session" \
-      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh'"
+      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' ACTOR_BC_COEF='$ACTOR_BC_COEF' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh'"
     echo "Launched $name on physical GPU ${gpus[$i]} in tmux $session"
   done
 }
@@ -282,7 +294,7 @@ queue_waiter() {
     exit 4
   fi
   tmux new-session -d -s "$session" \
-    "cd '$STABLEWM_ROOT' && MODE=wait-launch PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' GPU_IDS='$GPU_IDS' GPU_MEMORY_LIMIT_MIB='$GPU_MEMORY_LIMIT_MIB' WAIT_INTERVAL_SECONDS='$WAIT_INTERVAL_SECONDS' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh' 2>&1 | tee '$RUN_ROOT/${session}.log'"
+    "cd '$STABLEWM_ROOT' && MODE=wait-launch PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' ACTOR_BC_COEF='$ACTOR_BC_COEF' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' GPU_IDS='$GPU_IDS' GPU_MEMORY_LIMIT_MIB='$GPU_MEMORY_LIMIT_MIB' WAIT_INTERVAL_SECONDS='$WAIT_INTERVAL_SECONDS' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh' 2>&1 | tee '$RUN_ROOT/${session}.log'"
   echo "Queued waiter in tmux $session"
 }
 
@@ -302,6 +314,7 @@ case "$MODE" in
   test) unit_test ;;
   validate) validate_data ;;
   audit-data) audit_data ;;
+  migrate-rewards) migrate_rewards ;;
   smoke) smoke ;;
   run-one) run_one ;;
   launch) launch_all ;;
@@ -309,7 +322,7 @@ case "$MODE" in
   queue-waiter) queue_waiter ;;
   status) status ;;
   *)
-    echo "MODE must be test, validate, audit-data, smoke, run-one, launch, wait-launch, queue-waiter, or status" >&2
+    echo "MODE must be test, validate, audit-data, migrate-rewards, smoke, run-one, launch, wait-launch, queue-waiter, or status" >&2
     exit 2
     ;;
 esac
