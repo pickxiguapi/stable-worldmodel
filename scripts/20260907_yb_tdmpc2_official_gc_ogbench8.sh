@@ -11,6 +11,7 @@ MODE=${MODE:-status}
 PYTHON_BIN=${PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
 DATASET_ROOT=${DATASET_ROOT:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50}
 RUN_ROOT=${RUN_ROOT:-/root/data/yyf/tdmpc2-official-gc-ogbench8-runs}
+PYTHON_DEV_ROOT=${PYTHON_DEV_ROOT:-$RUN_ROOT/.runtime/python-dev}
 RUN_LABEL=${RUN_LABEL:-official_e9f5932_gc_h50_ms100000_s1}
 OFFICIAL_COMMIT=${OFFICIAL_COMMIT:-e9f59321933cbc8e11a002b842adc7d4ffae8ff1}
 SEGMENT_TRANSITIONS=${SEGMENT_TRANSITIONS:-50}
@@ -82,6 +83,30 @@ check_official_source() {
   fi
 }
 
+prepare_python_headers() {
+  if [[ -f /usr/include/python3.10/Python.h ]]; then
+    return
+  fi
+  local include_dir="$PYTHON_DEV_ROOT/usr/include/python3.10"
+  local platform_include_dir="$PYTHON_DEV_ROOT/usr/include/x86_64-linux-gnu/python3.10"
+  if [[ ! -f "$include_dir/Python.h" || ! -f "$platform_include_dir/pyconfig.h" ]]; then
+    local deb_dir="$PYTHON_DEV_ROOT/debs"
+    mkdir -p "$deb_dir" "$PYTHON_DEV_ROOT"
+    (
+      cd "$deb_dir"
+      apt-get download -qq libpython3.10-dev python3.10-dev
+      for deb in ./*.deb; do
+        dpkg-deb -x "$deb" "$PYTHON_DEV_ROOT"
+      done
+    )
+  fi
+  if [[ ! -f "$include_dir/Python.h" || ! -f "$platform_include_dir/pyconfig.h" ]]; then
+    echo "Failed to stage Python 3.10 development headers" >&2
+    exit 2
+  fi
+  export CPATH="$include_dir:$platform_include_dir${CPATH:+:$CPATH}"
+}
+
 dataset_path() {
   local index=$1
   printf '%s/%s.h5\n' "$DATASET_ROOT" "${envs[$index]}"
@@ -147,6 +172,7 @@ run_one() {
   : "${TASK_INDEX:?TASK_INDEX is required for MODE=run-one}"
   : "${GPU_ID:?GPU_ID is required for MODE=run-one}"
   check_official_source
+  prepare_python_headers
 
   local dataset
   local name
@@ -227,7 +253,7 @@ launch_all() {
       exit 4
     fi
     tmux new-session -d -s "$session" \
-      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh'"
+      "cd '$STABLEWM_ROOT' && MODE=run-one TASK_INDEX='$i' GPU_ID='${gpus[$i]}' PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh'"
     echo "Launched $name on physical GPU ${gpus[$i]} in tmux $session"
   done
 }
@@ -253,7 +279,7 @@ queue_waiter() {
     exit 4
   fi
   tmux new-session -d -s "$session" \
-    "cd '$STABLEWM_ROOT' && MODE=wait-launch PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' GPU_IDS='$GPU_IDS' GPU_MEMORY_LIMIT_MIB='$GPU_MEMORY_LIMIT_MIB' WAIT_INTERVAL_SECONDS='$WAIT_INTERVAL_SECONDS' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh' 2>&1 | tee '$RUN_ROOT/${session}.log'"
+    "cd '$STABLEWM_ROOT' && MODE=wait-launch PYTHON_BIN='$PYTHON_BIN' DATASET_ROOT='$DATASET_ROOT' RUN_ROOT='$RUN_ROOT' PYTHON_DEV_ROOT='$PYTHON_DEV_ROOT' RUN_LABEL='$RUN_LABEL' OFFICIAL_COMMIT='$OFFICIAL_COMMIT' SEGMENT_TRANSITIONS='$SEGMENT_TRANSITIONS' MAX_STEPS='$MAX_STEPS' BATCH_SIZE='$BATCH_SIZE' HORIZON='$HORIZON' MODEL_SIZE='$MODEL_SIZE' SEED='$SEED' LOG_INTERVAL='$LOG_INTERVAL' CHECKPOINT_INTERVAL='$CHECKPOINT_INTERVAL' GPU_IDS='$GPU_IDS' GPU_MEMORY_LIMIT_MIB='$GPU_MEMORY_LIMIT_MIB' WAIT_INTERVAL_SECONDS='$WAIT_INTERVAL_SECONDS' COMPILE='$COMPILE' bash '$STABLEWM_ROOT/scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh' 2>&1 | tee '$RUN_ROOT/${session}.log'"
   echo "Queued waiter in tmux $session"
 }
 
