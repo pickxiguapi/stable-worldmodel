@@ -44,6 +44,7 @@ EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
 ENV_ID=${ENV_ID:-visual-cube-single-v0}
+RESUME=${RESUME:-0}
 
 RUN_NAME="ldp_cube_single_${RUN_LABEL}_s${SEED}"
 VAE_DIR=${VAE_DIR:-$ARTIFACT_ROOT/runs/${RUN_NAME}_vae}
@@ -217,10 +218,15 @@ train_vae() {
   mkdir -p "$(dirname "$VAE_DIR")"
   cd "$STABLEWM_ROOT"
   export CUDA_VISIBLE_DEVICES="$GPU_ID"
+  local resume_args=()
+  if [[ "$RESUME" == 1 ]]; then
+    resume_args=(--resume)
+  fi
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py train-vae \
     --source "$SOURCE_DATASET" --output-dir "$VAE_DIR" \
     --steps "$VAE_STEPS" --batch-size "$VAE_BATCH_SIZE" --seed "$SEED" \
-    --log-every "$VAE_LOG_EVERY" --save-every "$VAE_SAVE_EVERY"
+    --log-every "$VAE_LOG_EVERY" --save-every "$VAE_SAVE_EVERY" \
+    "${resume_args[@]}"
 }
 
 encode_data() {
@@ -249,13 +255,17 @@ train_ldp() {
   mkdir -p "$(dirname "$LDP_DIR")"
   cd "$STABLEWM_ROOT"
   export CUDA_VISIBLE_DEVICES="$GPU_ID"
+  local resume_args=()
+  if [[ "$RESUME" == 1 ]]; then
+    resume_args=(--resume)
+  fi
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py train-ldp \
     --source "$SOURCE_DATASET" --latents "$LATENT_FILE" \
     --output-dir "$LDP_DIR" --steps "$LDP_STEPS" \
     --batch-size "$LDP_BATCH_SIZE" --pred-horizon "$PRED_HORIZON" \
     --action-horizon "$ACTION_HORIZON" --diffusion-steps "$DIFFUSION_STEPS" \
     --seed "$SEED" --log-every "$LDP_LOG_EVERY" --save-every "$LDP_SAVE_EVERY" \
-    --validation-batches "$LDP_VALIDATION_BATCHES"
+    --validation-batches "$LDP_VALIDATION_BATCHES" "${resume_args[@]}"
 }
 
 run_eval() {

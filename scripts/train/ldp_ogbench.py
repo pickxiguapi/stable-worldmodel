@@ -149,7 +149,6 @@ def train_vae(args: argparse.Namespace) -> None:
 
     commit = verify_upstream()
     data = OGBenchLDPData(args.source)
-    output = create_output_dir(args.output_dir)
     config = {
         'kind': 'ogbench_ldp_vae',
         'upstream_commit': commit,
@@ -166,7 +165,21 @@ def train_vae(args: argparse.Namespace) -> None:
         'seed': args.seed,
         'vae_arch': VAE_ARCH,
     }
-    write_json(output / 'config.json', config)
+    output = args.output_dir.expanduser().resolve()
+    if args.resume:
+        if not output.is_dir():
+            raise FileNotFoundError(f'VAE resume directory does not exist: {output}')
+        existing_config = json.loads((output / 'config.json').read_text())
+        mismatches = {
+            key: (existing_config.get(key), value)
+            for key, value in config.items()
+            if key != 'adapter_commit' and existing_config.get(key) != value
+        }
+        if mismatches:
+            raise RuntimeError(f'VAE resume config mismatch: {mismatches}')
+    else:
+        output = create_output_dir(output)
+        write_json(output / 'config.json', config)
     print(f'JAX_DEVICES={jax.local_devices()}', flush=True)
 
     vae = make_vae()
@@ -185,6 +198,51 @@ def train_vae(args: argparse.Namespace) -> None:
     )
     optimizer = optax.chain(optax.clip_by_global_norm(100.0), optax.adam(schedule))
     opt_state = optimizer.init(params)
+
+    start_step = 0
+    elapsed_offset = 0.0
+    np_rng = np.random.default_rng(args.seed)
+    if args.resume:
+        checkpoint_path = output / 'checkpoint.msgpack'
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f'VAE resume checkpoint does not exist: {checkpoint_path}')
+        checkpoint = load_msgpack(checkpoint_path)
+        start_step = int(checkpoint['step'])
+        params = checkpoint['params']
+        ema_params = checkpoint['ema_params']
+        exact_resume = False
+        stateful_checkpoint = 'opt_state' in checkpoint and 'rng' in checkpoint
+        if stateful_checkpoint:
+            from flax import serialization
+
+            opt_state = serialization.from_state_dict(opt_state, checkpoint['opt_state'])
+            rng = jnp.asarray(checkpoint['rng'], dtype=jnp.uint32)
+            resume_state_path = output / 'resume_state.json'
+            if resume_state_path.is_file():
+                resume_state = json.loads(resume_state_path.read_text())
+                if int(resume_state['step']) == start_step:
+                    np_rng.bit_generator.state = resume_state['numpy_rng_state']
+                    elapsed_offset = float(resume_state.get('elapsed_seconds', 0.0))
+                    exact_resume = True
+        if not exact_resume:
+            # Replaying the inexpensive NumPy sampler preserves its position even
+            # if a crash landed between the atomic checkpoint and sidecar writes.
+            for _ in range(start_step):
+                data.sample_image_rows(np_rng, args.batch_size)
+            if stateful_checkpoint:
+                exact_resume = True
+            else:
+                # Legacy checkpoints predate optimizer/RNG persistence.
+                rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), start_step)
+        resume_event = {
+            'kind': 'vae_resume',
+            'step': start_step,
+            'exact': exact_resume,
+            'adapter_commit': adapter_commit(),
+            'time': time.time(),
+        }
+        append_jsonl(output / 'events.jsonl', resume_event)
+        print('VAE_RESUME=' + json.dumps(resume_event, sort_keys=True), flush=True)
 
     @jax.jit
     def update(params, ema_params, opt_state, images, key):
@@ -219,11 +277,10 @@ def train_vae(args: argparse.Namespace) -> None:
             'grad_norm': optax.global_norm(grads),
         }
 
-    np_rng = np.random.default_rng(args.seed)
-    started = time.time()
+    started = time.time() - elapsed_offset
     metrics_path = output / 'metrics.jsonl'
     with h5py.File(data.source_path, 'r') as source:
-        for step in range(1, args.steps + 1):
+        for step in range(start_step + 1, args.steps + 1):
             rows = data.sample_image_rows(np_rng, args.batch_size)
             images = image_batch(source, rows)
             rng, update_rng = jax.random.split(rng)
@@ -242,7 +299,21 @@ def train_vae(args: argparse.Namespace) -> None:
             if step % args.save_every == 0 or step == args.steps:
                 save_msgpack(
                     output / 'checkpoint.msgpack',
-                    {'params': params, 'ema_params': ema_params, 'step': step},
+                    {
+                        'params': params,
+                        'ema_params': ema_params,
+                        'opt_state': opt_state,
+                        'rng': rng,
+                        'step': step,
+                    },
+                )
+                write_json(
+                    output / 'resume_state.json',
+                    {
+                        'step': step,
+                        'elapsed_seconds': time.time() - started,
+                        'numpy_rng_state': np_rng.bit_generator.state,
+                    },
                 )
     print(f'VAE_COMPLETE={output}', flush=True)
 
@@ -456,7 +527,7 @@ def train_ldp(args: argparse.Namespace) -> None:
     commit = verify_upstream()
     data = OGBenchLDPData(args.source, args.latents)
     data.load_training_arrays()
-    output = create_output_dir(args.output_dir)
+    output = args.output_dir.expanduser().resolve()
     planner, idm = make_ldp_models(data.latent_dim, data.action_dim)
     planner_scheduler, planner_scheduler_state, idm_scheduler, idm_scheduler_state = (
         make_schedulers(args.diffusion_steps)
@@ -514,7 +585,20 @@ def train_ldp(args: argparse.Namespace) -> None:
         'seed': args.seed,
         'planner_down_dims': [256, 512, 1024],
     }
-    write_json(output / 'config.json', config)
+    if args.resume:
+        if not output.is_dir():
+            raise FileNotFoundError(f'LDP resume directory does not exist: {output}')
+        existing_config = json.loads((output / 'config.json').read_text())
+        mismatches = {
+            key: (existing_config.get(key), value)
+            for key, value in config.items()
+            if key != 'adapter_commit' and existing_config.get(key) != value
+        }
+        if mismatches:
+            raise RuntimeError(f'LDP resume config mismatch: {mismatches}')
+    else:
+        output = create_output_dir(output)
+        write_json(output / 'config.json', config)
     print(f'JAX_DEVICES={jax.local_devices()}', flush=True)
     print(
         f'PARAMETERS planner={sum(x.size for x in jax.tree_util.tree_leaves(planner_params))} '
@@ -598,9 +682,56 @@ def train_ldp(args: argparse.Namespace) -> None:
     train_sampling_rng = np.random.default_rng(args.seed)
     validation_sampling_rng = np.random.default_rng(args.seed + 1_000_003)
     train_rng, validation_rng = jax.random.split(rng)
-    started = time.time()
+    start_step = 0
+    elapsed_offset = 0.0
+    if args.resume:
+        checkpoint_path = output / 'checkpoint.msgpack'
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f'LDP resume checkpoint does not exist: {checkpoint_path}')
+        checkpoint = load_msgpack(checkpoint_path)
+        start_step = int(checkpoint['step'])
+        params = checkpoint['params']
+        exact_resume = False
+        required_state = {'opt_state', 'train_rng', 'validation_rng'}
+        stateful_checkpoint = required_state.issubset(checkpoint)
+        if stateful_checkpoint:
+            from flax import serialization
+
+            opt_state = serialization.from_state_dict(opt_state, checkpoint['opt_state'])
+            train_rng = jnp.asarray(checkpoint['train_rng'], dtype=jnp.uint32)
+            validation_rng = jnp.asarray(
+                checkpoint['validation_rng'], dtype=jnp.uint32
+            )
+            resume_state_path = output / 'resume_state.json'
+            if resume_state_path.is_file():
+                resume_state = json.loads(resume_state_path.read_text())
+                if int(resume_state['step']) == start_step:
+                    train_sampling_rng.bit_generator.state = resume_state[
+                        'train_sampling_rng_state'
+                    ]
+                    validation_sampling_rng.bit_generator.state = resume_state[
+                        'validation_sampling_rng_state'
+                    ]
+                    elapsed_offset = float(resume_state.get('elapsed_seconds', 0.0))
+                    exact_resume = True
+        if not exact_resume and not stateful_checkpoint:
+            opt_state = optimizer.init(params)
+            train_rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), start_step)
+            validation_rng = jax.random.fold_in(
+                jax.random.PRNGKey(args.seed + 1_000_003), start_step
+            )
+        resume_event = {
+            'kind': 'ldp_resume',
+            'step': start_step,
+            'exact': exact_resume,
+            'adapter_commit': adapter_commit(),
+            'time': time.time(),
+        }
+        append_jsonl(output / 'events.jsonl', resume_event)
+        print('LDP_RESUME=' + json.dumps(resume_event, sort_keys=True), flush=True)
+    started = time.time() - elapsed_offset
     metrics_path = output / 'metrics.jsonl'
-    for step in range(1, args.steps + 1):
+    for step in range(start_step + 1, args.steps + 1):
         batch = data.sample_windows(
             train_sampling_rng,
             args.batch_size,
@@ -667,7 +798,24 @@ def train_ldp(args: argparse.Namespace) -> None:
         if step % args.save_every == 0 or step == args.steps:
             save_msgpack(
                 output / 'checkpoint.msgpack',
-                {'params': params, 'step': step},
+                {
+                    'params': params,
+                    'opt_state': opt_state,
+                    'train_rng': train_rng,
+                    'validation_rng': validation_rng,
+                    'step': step,
+                },
+            )
+            write_json(
+                output / 'resume_state.json',
+                {
+                    'step': step,
+                    'elapsed_seconds': time.time() - started,
+                    'train_sampling_rng_state': train_sampling_rng.bit_generator.state,
+                    'validation_sampling_rng_state': (
+                        validation_sampling_rng.bit_generator.state
+                    ),
+                },
             )
     print(f'LDP_COMPLETE={output}', flush=True)
 
@@ -959,6 +1107,7 @@ def parser() -> argparse.ArgumentParser:
     vae_parser.add_argument('--seed', type=int, default=1)
     vae_parser.add_argument('--log-every', type=int, default=100)
     vae_parser.add_argument('--save-every', type=int, default=10_000)
+    vae_parser.add_argument('--resume', action='store_true')
     vae_parser.set_defaults(func=train_vae)
 
     encode_parser = commands.add_parser('encode')
@@ -988,6 +1137,7 @@ def parser() -> argparse.ArgumentParser:
     ldp_parser.add_argument('--seed', type=int, default=1)
     ldp_parser.add_argument('--log-every', type=int, default=100)
     ldp_parser.add_argument('--save-every', type=int, default=10_000)
+    ldp_parser.add_argument('--resume', action='store_true')
     ldp_parser.set_defaults(func=train_ldp)
 
     eval_parser = commands.add_parser('eval')
