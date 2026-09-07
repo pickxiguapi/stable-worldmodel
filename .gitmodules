@@ -1,3 +1,7 @@
 [submodule "third_party/tdmpc2"]
 	path = third_party/tdmpc2
 	url = https://github.com/nicklashansen/tdmpc2.git
+[submodule "third_party/latent_diffusion_planning"]
+	path = third_party/latent_diffusion_planning
+	url = https://github.com/amberxie88/latent_diffusion_planning.git
+	branch = master
