@@ -36,6 +36,7 @@ LDP_STEPS=${LDP_STEPS:-100000}
 LDP_BATCH_SIZE=${LDP_BATCH_SIZE:-128}
 LDP_LOG_EVERY=${LDP_LOG_EVERY:-100}
 LDP_SAVE_EVERY=${LDP_SAVE_EVERY:-10000}
+LDP_VALIDATION_BATCHES=${LDP_VALIDATION_BATCHES:-4}
 PRED_HORIZON=${PRED_HORIZON:-8}
 ACTION_HORIZON=${ACTION_HORIZON:-4}
 DIFFUSION_STEPS=${DIFFUSION_STEPS:-100}
@@ -253,7 +254,8 @@ train_ldp() {
     --output-dir "$LDP_DIR" --steps "$LDP_STEPS" \
     --batch-size "$LDP_BATCH_SIZE" --pred-horizon "$PRED_HORIZON" \
     --action-horizon "$ACTION_HORIZON" --diffusion-steps "$DIFFUSION_STEPS" \
-    --seed "$SEED" --log-every "$LDP_LOG_EVERY" --save-every "$LDP_SAVE_EVERY"
+    --seed "$SEED" --log-every "$LDP_LOG_EVERY" --save-every "$LDP_SAVE_EVERY" \
+    --validation-batches "$LDP_VALIDATION_BATCHES"
 }
 
 run_eval() {

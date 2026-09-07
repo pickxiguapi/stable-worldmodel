@@ -498,6 +498,7 @@ def train_ldp(args: argparse.Namespace) -> None:
         'learning_rate': args.learning_rate,
         'end_learning_rate': args.end_learning_rate,
         'warmup_steps': args.warmup_steps,
+        'validation_batches': args.validation_batches,
         'seed': args.seed,
         'planner_down_dims': [256, 512, 1024],
     }
@@ -509,51 +510,55 @@ def train_ldp(args: argparse.Namespace) -> None:
         flush=True,
     )
 
+    def diffusion_loss(candidate, current, future, goal, actions, key):
+        batch_size = current.shape[0]
+        planner_key, idm_key, planner_time_key, idm_time_key = jax.random.split(
+            key, 4
+        )
+        planner_t = jax.random.randint(
+            planner_time_key, (batch_size,), 0, args.diffusion_steps
+        )
+        planner_noise = jax.random.normal(planner_key, future.shape)
+        noisy_future = planner_scheduler.add_noise(
+            planner_scheduler_state, future, planner_noise, planner_t
+        )
+        condition = jnp.concatenate([current[:, 0], goal], axis=-1)
+        predicted_planner_noise = planner.apply(
+            {'params': candidate['planner']},
+            noisy_future,
+            planner_t,
+            condition,
+        )
+        planner_loss = jnp.mean(
+            jnp.square(predicted_planner_noise - planner_noise)
+        )
+
+        states = jnp.concatenate([current, future], axis=1)
+        transitions = jnp.concatenate([states[:, :-1], states[:, 1:]], axis=-1)
+        transitions = transitions.reshape(-1, data.latent_dim * 2)
+        flat_actions = actions.reshape(-1, data.action_dim)
+        idm_t = jax.random.randint(
+            idm_time_key, (flat_actions.shape[0], 1), 0, args.diffusion_steps
+        )
+        idm_noise = jax.random.normal(idm_key, flat_actions.shape)
+        noisy_actions = idm_scheduler.add_noise(
+            idm_scheduler_state, flat_actions, idm_noise, idm_t
+        )
+        predicted_idm_noise = idm.apply(
+            {'params': candidate['idm']},
+            transitions,
+            noisy_actions,
+            idm_t,
+        )
+        idm_loss = jnp.mean(jnp.square(predicted_idm_noise - idm_noise))
+        return planner_loss + idm_loss, (planner_loss, idm_loss)
+
     @jax.jit
     def update(params, opt_state, current, future, goal, actions, key):
-        batch_size = current.shape[0]
-
         def loss_fn(candidate):
-            planner_key, idm_key, planner_time_key, idm_time_key = jax.random.split(
-                key, 4
+            return diffusion_loss(
+                candidate, current, future, goal, actions, key
             )
-            planner_t = jax.random.randint(
-                planner_time_key, (batch_size,), 0, args.diffusion_steps
-            )
-            planner_noise = jax.random.normal(planner_key, future.shape)
-            noisy_future = planner_scheduler.add_noise(
-                planner_scheduler_state, future, planner_noise, planner_t
-            )
-            condition = jnp.concatenate([current[:, 0], goal], axis=-1)
-            predicted_planner_noise = planner.apply(
-                {'params': candidate['planner']},
-                noisy_future,
-                planner_t,
-                condition,
-            )
-            planner_loss = jnp.mean(
-                jnp.square(predicted_planner_noise - planner_noise)
-            )
-
-            states = jnp.concatenate([current, future], axis=1)
-            transitions = jnp.concatenate([states[:, :-1], states[:, 1:]], axis=-1)
-            transitions = transitions.reshape(-1, data.latent_dim * 2)
-            flat_actions = actions.reshape(-1, data.action_dim)
-            idm_t = jax.random.randint(
-                idm_time_key, (flat_actions.shape[0], 1), 0, args.diffusion_steps
-            )
-            idm_noise = jax.random.normal(idm_key, flat_actions.shape)
-            noisy_actions = idm_scheduler.add_noise(
-                idm_scheduler_state, flat_actions, idm_noise, idm_t
-            )
-            predicted_idm_noise = idm.apply(
-                {'params': candidate['idm']},
-                transitions,
-                noisy_actions,
-                idm_t,
-            )
-            idm_loss = jnp.mean(jnp.square(predicted_idm_noise - idm_noise))
-            return planner_loss + idm_loss, (planner_loss, idm_loss)
 
         (loss, (planner_loss, idm_loss)), grads = jax.value_and_grad(
             loss_fn, has_aux=True
@@ -565,6 +570,17 @@ def train_ldp(args: argparse.Namespace) -> None:
             'planner_loss': planner_loss,
             'idm_loss': idm_loss,
             'grad_norm': optax.global_norm(grads),
+        }
+
+    @jax.jit
+    def validation_loss(params, current, future, goal, actions, key):
+        loss, (planner_loss, idm_loss) = diffusion_loss(
+            params, current, future, goal, actions, key
+        )
+        return {
+            'val_loss': loss,
+            'val_planner_loss': planner_loss,
+            'val_idm_loss': idm_loss,
         }
 
     np_rng = np.random.default_rng(args.seed)
@@ -588,11 +604,41 @@ def train_ldp(args: argparse.Namespace) -> None:
             update_rng,
         )
         if step == 1 or step % args.log_every == 0 or step == args.steps:
+            validation_records = []
+            for _ in range(args.validation_batches):
+                val_batch = data.sample_windows(
+                    np_rng, args.batch_size, args.pred_horizon, split='val'
+                )
+                val_current = normalize(
+                    val_batch['current'], data.latent_min, data.latent_max
+                )
+                val_future = normalize(
+                    val_batch['future'], data.latent_min, data.latent_max
+                )
+                val_goal = normalize(
+                    val_batch['goal'], data.latent_min, data.latent_max
+                )
+                rng, validation_rng = jax.random.split(rng)
+                validation_records.append(
+                    validation_loss(
+                        params,
+                        val_current,
+                        val_future,
+                        val_goal,
+                        val_batch['actions'],
+                        validation_rng,
+                    )
+                )
+            validation_metrics = {
+                key: float(np.mean([np.asarray(item[key]) for item in validation_records]))
+                for key in validation_records[0]
+            }
             record = {
                 'step': step,
                 'elapsed_seconds': time.time() - started,
                 'learning_rate': float(schedule(step - 1)),
                 **{key: float(value) for key, value in metrics.items()},
+                **validation_metrics,
             }
             append_jsonl(metrics_path, record)
             print('LDP_METRICS=' + json.dumps(record, sort_keys=True), flush=True)
@@ -914,6 +960,7 @@ def parser() -> argparse.ArgumentParser:
     ldp_parser.add_argument('--learning-rate', type=float, default=1e-4)
     ldp_parser.add_argument('--end-learning-rate', type=float, default=1e-6)
     ldp_parser.add_argument('--warmup-steps', type=int, default=1_000)
+    ldp_parser.add_argument('--validation-batches', type=int, default=4)
     ldp_parser.add_argument('--seed', type=int, default=1)
     ldp_parser.add_argument('--log-every', type=int, default=100)
     ldp_parser.add_argument('--save-every', type=int, default=10_000)
@@ -936,7 +983,15 @@ def main() -> None:
     args = parser().parse_args()
     positive = [
         name
-        for name in ('steps', 'batch_size', 'pred_horizon', 'action_horizon', 'episodes')
+        for name in (
+            'steps',
+            'batch_size',
+            'pred_horizon',
+            'action_horizon',
+            'episodes',
+            'validation_samples',
+            'validation_batches',
+        )
         if hasattr(args, name) and getattr(args, name) < 1
     ]
     if positive:
