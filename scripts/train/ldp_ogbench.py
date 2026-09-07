@@ -272,6 +272,47 @@ def encode(args: argparse.Namespace) -> None:
             {'params': params}, images, method=vae.encode
         ).latent_dist.mean
 
+    @jax.jit
+    def reconstruct_images(images):
+        latent = vae.apply(
+            {'params': params}, images, method=vae.encode
+        ).latent_dist.mean
+        return vae.apply(
+            {'params': params}, latent, method=vae.decode
+        ).sample
+
+    validation_rng = np.random.default_rng(args.validation_seed)
+    validation_rows = data.sample_image_rows(
+        validation_rng, args.validation_samples, split='val'
+    )
+    with h5py.File(data.source_path, 'r') as source:
+        validation_images = image_batch(source, validation_rows)
+    reconstruction = np.asarray(
+        reconstruct_images(jnp.asarray(validation_images))
+    )
+    validation_mse = float(
+        np.mean(np.square(reconstruction - validation_images))
+    )
+    validation_psnr = float(10 * np.log10(4.0 / validation_mse))
+    validation = {
+        'split': 'held_out_episodes',
+        'samples': args.validation_samples,
+        'seed': args.validation_seed,
+        'mse_normalized_minus1_plus1': validation_mse,
+        'psnr_db': validation_psnr,
+        'max_abs_reconstruction': float(np.max(np.abs(reconstruction))),
+        'finite': bool(np.isfinite(reconstruction).all()),
+        'threshold_mse': args.max_validation_mse,
+    }
+    print('VAE_VALIDATION=' + json.dumps(validation, sort_keys=True), flush=True)
+    if not validation['finite'] or not np.isfinite(validation_mse):
+        raise RuntimeError('VAE held-out reconstruction contains NaN or Inf')
+    if validation_mse > args.max_validation_mse:
+        raise RuntimeError(
+            f'VAE held-out MSE {validation_mse:.6f} exceeds '
+            f'{args.max_validation_mse:.6f}'
+        )
+
     latent_min = np.inf
     latent_max = -np.inf
     temporary = output.with_suffix(output.suffix + '.tmp')
@@ -308,10 +349,13 @@ def encode(args: argparse.Namespace) -> None:
             destination.attrs['episodes'] = episodes
             destination.attrs['latent_min'] = latent_min
             destination.attrs['latent_max'] = latent_max
+            destination.attrs['vae_validation_mse'] = validation_mse
+            destination.attrs['vae_validation_psnr_db'] = validation_psnr
             destination.attrs['vae_dir'] = str(args.vae_dir.expanduser().resolve())
             destination.attrs['vae_source_size_bytes'] = vae_config['source_size_bytes']
             destination.attrs['upstream_commit'] = UPSTREAM_COMMIT
         temporary.replace(output)
+        write_json(output.with_suffix('.vae_validation.json'), validation)
     finally:
         if temporary.exists():
             temporary.unlink()
@@ -853,6 +897,9 @@ def parser() -> argparse.ArgumentParser:
     encode_parser.add_argument('--output', type=Path, required=True)
     encode_parser.add_argument('--batch-size', type=int, default=512)
     encode_parser.add_argument('--max-episodes', type=int)
+    encode_parser.add_argument('--validation-samples', type=int, default=128)
+    encode_parser.add_argument('--validation-seed', type=int, default=20260908)
+    encode_parser.add_argument('--max-validation-mse', type=float, default=0.1)
     encode_parser.set_defaults(func=encode)
 
     ldp_parser = commands.add_parser('train-ldp')
