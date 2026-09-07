@@ -1,0 +1,47 @@
+{
+  "audit_skill": "experiment-audit",
+  "verdict": "WARN",
+  "reason_code": "data_pass_results_pending_and_scope_limited",
+  "summary": "All eight current HDF5 datasets exactly match source data; GPU smoke, training, and evaluation results are pending.",
+  "audited_input_hashes": {
+    "scripts/data/convert_ogbench_npz_tdmpc2.py": "sha256:23e4b05f0052028ada69225dedb0434047178934c24ef75140a6f4dd47b4d3af",
+    "scripts/train/tdmpc2_official_gc.py": "sha256:c93d19727d93daafcd81aa9f283f80308a1ac46d85ef51479dbdf81bcfb6d488",
+    "tests/test_tdmpc2_official_gc.py": "sha256:871880a35fe0ff2234c4e08179611fe2979c669e1bd6fcbe95560df28e282795",
+    "scripts/20260907_yb_tdmpc2_official_gc_ogbench8.sh": "sha256:e134fa9999d3bbbc7cb34eef19729617c7a45e6d69d04b23ad9d49ddedce8e6c",
+    "scripts/plan/eval_tdmpc2_official_gc_cube.py": "sha256:555c3c12bd11006cc76f2e11ef83a8813a5f0907e88e2e3a8231af3df3a27fda",
+    "scripts/20260907_yb_eval_tdmpc2_official_gc_simple.sh": "sha256:4a20d1e926988dbc480aa353e15916224ff35e863002fbc7834ee17e98f58769"
+  },
+  "trace_path": ".aris/traces/experiment-audit/2026-09-07_run01/",
+  "agent_id": "/root/audit_tdmpc2_dataset",
+  "verdict_id": "/root/audit_tdmpc2_dataset",
+  "executor_model": "gpt-6-astra",
+  "executor_family": "openai",
+  "reviewer_model": "gpt-5.6-sol",
+  "reviewer_family": "openai",
+  "reviewer_reasoning": "ultra",
+  "review_independence": "same-family",
+  "acceptance_status": "provisional",
+  "generated_at": "2026-09-07T11:17:25+08:00",
+  "date": "2026-09-07",
+  "auditor": "gpt-5.6-sol-ultra",
+  "overall_verdict": "warn",
+  "integrity_status": "warn",
+  "checks": {
+    "gt_provenance": {"status": "pass", "details": "All goals and pixels are source-derived; zero pixel mismatches across 12,240,000 rows."},
+    "score_normalization": {"status": "pass", "details": "No evaluation self-normalization."},
+    "result_existence": {"status": "pass", "details": "Negative check: no result artifacts or claims exist yet."},
+    "dead_code": {"status": "pass", "details": "Training and evaluation entrypoints are connected through tracked Bash scripts."},
+    "scope": {"status": "warn", "details": "One training seed; planned evaluation is two tasks and 10 episodes each."},
+    "eval_type": "simulation_only"
+  },
+  "datasets": {
+    "count": 8,
+    "logical_pixel_rows": 12240000,
+    "pixel_mismatches": 0,
+    "source_verified": true
+  },
+  "claims": [
+    {"id": "data_integrity", "impact": "supported"},
+    {"id": "performance", "impact": "unsupported_until_results_exist"}
+  ]
+}
