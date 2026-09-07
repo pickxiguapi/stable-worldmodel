@@ -1,9 +1,42 @@
+from pathlib import Path
+from types import SimpleNamespace
+
 import h5py
 import numpy as np
 import pytest
 
 pytest.importorskip('torch')
-from scripts.train.tdmpc2_official_gc import GoalConditionedH5Replay
+from scripts.train.tdmpc2_official_gc import (
+    OFFICIAL_COMMIT,
+    GoalConditionedH5Replay,
+    build_official_config,
+    load_official_agent,
+)
+
+
+def test_official_source_and_config_contract():
+    repo_root = Path(__file__).resolve().parents[1]
+    _, cfg_to_dataclass, commit = load_official_agent(repo_root)
+    args = SimpleNamespace(
+        task='visual-cube-single-play-v0',
+        episodic=True,
+        segment_transitions=50,
+        steps=100_000,
+        batch_size=256,
+        horizon=3,
+        model_size=5,
+        compile=True,
+        seed=1,
+    )
+    cfg = build_official_config(
+        args, action_dim=5, cfg_to_dataclass=cfg_to_dataclass
+    )
+
+    assert commit == OFFICIAL_COMMIT
+    assert cfg.obs_shape == {'rgb': [6, 64, 64]}
+    assert cfg.simnorm_dim == 8
+    assert cfg.num_q == 5
+    assert cfg.batch_size == 256
 
 
 def test_goal_conditioned_replay_alignment(tmp_path):
