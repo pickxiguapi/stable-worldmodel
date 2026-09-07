@@ -125,10 +125,25 @@ setup_env() {
       echo "ENV_REUSE spec_sha256=$spec_hash python=$PYTHON_BIN"
       return
     fi
-    echo "Existing .venv-ldp does not match the tracked spec; refusing to overwrite it." >&2
-    exit 4
+    if [[ -f "$marker" ]]; then
+      echo "Existing .venv-ldp does not match the tracked spec; refusing to overwrite it." >&2
+      exit 4
+    fi
   fi
-  python3.10 -m venv "$STABLEWM_ROOT/.venv-ldp"
+  if [[ -d "$STABLEWM_ROOT/.venv-ldp" ]]; then
+    if [[ ! -f "$STABLEWM_ROOT/.venv-ldp/pyvenv.cfg" ]]; then
+      echo "Refusing to remove an unrecognized partial environment" >&2
+      exit 4
+    fi
+    echo "Removing incomplete environment from a failed bootstrap: $STABLEWM_ROOT/.venv-ldp"
+    rm -rf "$STABLEWM_ROOT/.venv-ldp"
+  fi
+  if [[ ! -x "$STABLEWM_ROOT/.venv/bin/python" ]]; then
+    echo "Bootstrap environment is missing: $STABLEWM_ROOT/.venv" >&2
+    exit 2
+  fi
+  "$STABLEWM_ROOT/.venv/bin/python" -m virtualenv \
+    --python "$(command -v python3.10)" "$STABLEWM_ROOT/.venv-ldp"
   "$PYTHON_BIN" -m pip install --upgrade 'pip==24.0'
   "$PYTHON_BIN" -m pip install \
     'numpy==1.26.4' 'scipy==1.13.1' 'h5py==3.11.0' 'pytest==8.3.5'

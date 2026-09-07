@@ -2,6 +2,7 @@
   "base": "NVIDIA driver 580.65.06 + CUDA 12 JAX plugin + Python 3.10",
   "checkout": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8",
   "venv": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8/.venv-ldp",
+  "venv_bootstrap": "existing checkout .venv virtualenv==21.7.1 with system Python 3.10",
   "system_pkgs": [
     "git",
     "tmux==3.2a"
