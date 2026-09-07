@@ -292,6 +292,16 @@ def validate(
             raise ValueError('pixels must use uint8 storage')
         if dataset['action'].ndim != 2:
             raise ValueError('action must have shape [rows, action_dim]')
+        if dataset['action'].dtype != np.float32:
+            raise ValueError('action must use float32 storage')
+        if dataset['reward'].dtype != np.float32:
+            raise ValueError('reward must use float32 storage')
+        if dataset['terminal'].dtype != np.bool_:
+            raise ValueError('terminal must use bool storage')
+        if not np.issubdtype(dataset['source_episode'].dtype, np.integer):
+            raise ValueError('source_episode must use an integer dtype')
+        if not np.issubdtype(dataset['source_step'].dtype, np.integer):
+            raise ValueError('source_step must use an integer dtype')
         for key in ('reward', 'terminal', 'source_episode', 'source_step'):
             if dataset[key].ndim != 1:
                 raise ValueError(f'{key} must be one-dimensional')

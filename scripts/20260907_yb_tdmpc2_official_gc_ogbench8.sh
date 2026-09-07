@@ -183,7 +183,7 @@ run_one() {
 }
 
 smoke() {
-  validate_data
+  audit_data
   if ! all_gpus_free; then
     echo "Smoke requires all configured GPUs free; set GPU_IDS to eight copies is not supported." >&2
     exit 3
@@ -200,7 +200,7 @@ smoke() {
 }
 
 launch_all() {
-  validate_data
+  audit_data
   if ! all_gpus_free; then
     echo "Launch aborted: all eight GPUs must be below ${GPU_MEMORY_LIMIT_MIB} MiB." >&2
     echo "Use MODE=wait-launch to queue without sharing GPUs." >&2
@@ -233,7 +233,8 @@ launch_all() {
 }
 
 wait_and_launch() {
-  validate_data
+  unit_test
+  audit_data
   while ! all_gpus_free; do
     echo "$(date '+%F %T %Z') waiting ${WAIT_INTERVAL_SECONDS}s for all GPUs"
     sleep "$WAIT_INTERVAL_SECONDS"
