@@ -1,34 +1,29 @@
 {
-  "base": "NVIDIA driver 580.65.06 + CUDA 12 JAX plugin + Python 3.10",
+  "base": "read-only OGBench JAX CUDA environment on NVIDIA driver 580.65.06",
   "checkout": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8",
-  "venv": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8/.venv-ldp",
-  "venv_bootstrap": "existing checkout .venv virtualenv==21.7.1 with system Python 3.10",
-  "system_pkgs": [
-    "git",
-    "tmux==3.2a"
-  ],
-  "pip_phases": [
-    [
-      "pip==24.0",
-      "numpy==1.26.4",
-      "scipy==1.13.1",
-      "h5py==3.11.0",
-      "pytest==8.3.5"
-    ],
-    [
-      "jax[cuda12_pip]==0.4.26 from https://storage.googleapis.com/jax-releases/jax_cuda_releases.html"
-    ],
-    [
-      "jax==0.4.26",
-      "flax==0.8.4",
-      "optax==0.2.2",
-      "orbax-checkpoint==0.5.14",
-      "diffusers==0.27.2",
-      "huggingface-hub==0.23.1",
-      "hydra-core==1.2.0",
-      "omegaconf==2.3.0"
-    ]
-  ],
+  "python": "/root/data/yyf/ogbench-new/.venv/bin/python",
+  "overlay": "/root/data/yyf/ldp-ogbench/runtime/site-packages",
+  "wheelhouse": "/root/data/yyf/ldp-wheelhouse",
+  "base_packages": {
+    "python": "3.10.12",
+    "jax": "0.4.33",
+    "jaxlib": "0.4.33",
+    "flax": "0.8.5",
+    "optax": "0.2.5",
+    "orbax-checkpoint": "0.6.4",
+    "numpy": "1.26.4",
+    "scipy": "1.15.3",
+    "h5py": "3.16.0"
+  },
+  "overlay_packages": {
+    "diffusers": "0.27.2",
+    "huggingface-hub": "0.23.1",
+    "filelock": "3.19.1",
+    "importlib-metadata": "8.7.0",
+    "regex": "2025.7.34",
+    "safetensors": "0.6.2",
+    "zipp": "3.23.0"
+  },
   "env": {
     "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
     "XLA_PYTHON_CLIENT_MEM_FRACTION": "0.18",
@@ -50,17 +45,9 @@
   ],
   "weight_dirs": {},
   "smoke": {
-    "import_names": [
-      "jax",
-      "flax",
-      "optax",
-      "orbax.checkpoint",
-      "diffusers",
-      "h5py"
-    ],
     "gpu_tests": [
       {
-        "cmd": "CUDA_VISIBLE_DEVICES=6 .venv-ldp/bin/python -c 'import jax,jax.numpy as jnp; k=jax.random.PRNGKey(0); x=jax.random.normal(k,(8,8)); y=(x@x).block_until_ready(); print(\"LDP_JAX_WITNESS\",y.shape,jax.devices()[0].device_kind,float(y.sum()))'",
+        "cmd": "CUDA_VISIBLE_DEVICES=6 MODE=env-witness bash scripts/20260908_yb_ldp_ogbench_cube.sh",
         "expect": "^LDP_JAX_WITNESS \\(8, 8\\) NVIDIA A800-SXM4-80GB"
       }
     ],

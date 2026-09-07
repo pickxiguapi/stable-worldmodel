@@ -8,10 +8,14 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 STABLEWM_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
 
 MODE=${MODE:-status}
-PYTHON_BIN=${PYTHON_BIN:-$STABLEWM_ROOT/.venv-ldp/bin/python}
+PYTHON_BIN=${PYTHON_BIN:-/root/data/yyf/ogbench-new/.venv/bin/python}
+TEST_PYTHON_BIN=${TEST_PYTHON_BIN:-$STABLEWM_ROOT/.venv/bin/python}
 ENV_SPEC=${ENV_SPEC:-$STABLEWM_ROOT/scripts/config/ldp_ogbench_env_spec.json}
 SOURCE_DATASET=${SOURCE_DATASET:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50/visual-cube-single-play-v0.h5}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/root/data/yyf/ldp-ogbench}
+LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-$ARTIFACT_ROOT/runtime}
+LDP_OVERLAY=${LDP_OVERLAY:-$LDP_RUNTIME_ROOT/site-packages}
+WHEELHOUSE=${WHEELHOUSE:-/root/data/yyf/ldp-wheelhouse}
 RUN_LABEL=${RUN_LABEL:-gc_finalgoal_h8_a4_ds100}
 OGBENCH_ROOT=${OGBENCH_ROOT:-/root/data/yyf/ogbench-eval-main-20260830}
 OGBENCH_SITE_PACKAGES=${OGBENCH_SITE_PACKAGES:-$OGBENCH_ROOT/.venv/lib/python3.10/site-packages}
@@ -44,7 +48,7 @@ LDP_DIR=${LDP_DIR:-$ARTIFACT_ROOT/runs/${RUN_NAME}_ldp}
 EVAL_DIR=${EVAL_DIR:-$ARTIFACT_ROOT/evals/${RUN_NAME}_eval${EPISODES}_s${EVAL_SEED}}
 
 export PYTHONUNBUFFERED=1
-export PYTHONPATH="$STABLEWM_ROOT:$STABLEWM_ROOT/third_party/latent_diffusion_planning:$OGBENCH_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$LDP_OVERLAY:$STABLEWM_ROOT:$STABLEWM_ROOT/third_party/latent_diffusion_planning:$OGBENCH_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export OGBENCH_SITE_PACKAGES
 export OMP_NUM_THREADS=${OMP_NUM_THREADS:-8}
 export MKL_NUM_THREADS=${MKL_NUM_THREADS:-8}
@@ -75,8 +79,11 @@ check_upstream() {
 
 require_python() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
-    echo "Python environment not found: $PYTHON_BIN" >&2
-    echo "Run MODE=setup-env first." >&2
+    echo "Read-only OGBench JAX environment not found: $PYTHON_BIN" >&2
+    exit 2
+  fi
+  if [[ ! -f "$LDP_RUNTIME_ROOT/.ldp_env_spec_sha256" ]]; then
+    echo "LDP dependency overlay is not initialized. Run MODE=setup-env first." >&2
     exit 2
   fi
 }
@@ -117,46 +124,43 @@ setup_env() {
     echo "Missing environment spec: $ENV_SPEC" >&2
     exit 2
   fi
-  local spec_hash marker
+  local spec_hash marker temporary
   spec_hash=$(python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$ENV_SPEC")
-  marker="$STABLEWM_ROOT/.venv-ldp/.ldp_env_spec_sha256"
-  if [[ -x "$PYTHON_BIN" ]]; then
-    if [[ -f "$marker" && $(<"$marker") == "$spec_hash" ]]; then
-      echo "ENV_REUSE spec_sha256=$spec_hash python=$PYTHON_BIN"
-      return
-    fi
-    if [[ -f "$marker" ]]; then
-      echo "Existing .venv-ldp does not match the tracked spec; refusing to overwrite it." >&2
-      exit 4
-    fi
+  marker="$LDP_RUNTIME_ROOT/.ldp_env_spec_sha256"
+  if [[ -f "$marker" && $(<"$marker") == "$spec_hash" ]]; then
+    echo "ENV_REUSE spec_sha256=$spec_hash python=$PYTHON_BIN overlay=$LDP_OVERLAY"
+    return
   fi
-  if [[ -d "$STABLEWM_ROOT/.venv-ldp" ]]; then
-    if [[ ! -f "$STABLEWM_ROOT/.venv-ldp/pyvenv.cfg" ]]; then
-      echo "Refusing to remove an unrecognized partial environment" >&2
-      exit 4
-    fi
-    echo "Removing incomplete environment from a failed bootstrap: $STABLEWM_ROOT/.venv-ldp"
-    rm -rf "$STABLEWM_ROOT/.venv-ldp"
+  if [[ -f "$marker" ]]; then
+    echo "Existing LDP overlay does not match the tracked spec; refusing to overwrite it." >&2
+    exit 4
   fi
-  if [[ ! -x "$STABLEWM_ROOT/.venv/bin/python" ]]; then
-    echo "Bootstrap environment is missing: $STABLEWM_ROOT/.venv" >&2
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Read-only OGBench JAX environment is missing: $PYTHON_BIN" >&2
     exit 2
   fi
-  "$STABLEWM_ROOT/.venv/bin/python" -m virtualenv \
-    --python "$(command -v python3.10)" "$STABLEWM_ROOT/.venv-ldp"
-  "$PYTHON_BIN" -m pip install --upgrade 'pip==24.0'
-  "$PYTHON_BIN" -m pip install \
-    'numpy==1.26.4' 'scipy==1.13.1' 'h5py==3.11.0' 'pytest==8.3.5'
-  "$PYTHON_BIN" -m pip install \
-    --find-links https://storage.googleapis.com/jax-releases/jax_cuda_releases.html \
-    'jax[cuda12_pip]==0.4.26'
-  "$PYTHON_BIN" -m pip install \
-    'jax==0.4.26' 'flax==0.8.4' 'optax==0.2.2' \
-    'orbax-checkpoint==0.5.14' 'diffusers==0.27.2' \
-    'huggingface-hub==0.23.1' 'hydra-core==1.2.0' 'omegaconf==2.3.0'
-  printf '%s\n' "$spec_hash" > "$marker"
-  "$PYTHON_BIN" -m pip freeze > "$STABLEWM_ROOT/.venv-ldp/requirements.freeze.txt"
-  echo "ENV_CREATED spec_sha256=$spec_hash python=$PYTHON_BIN"
+  if [[ ! -d "$WHEELHOUSE" ]]; then
+    echo "Offline LDP wheelhouse is missing: $WHEELHOUSE" >&2
+    exit 2
+  fi
+  if [[ -d "$LDP_RUNTIME_ROOT" ]]; then
+    echo "Existing unmarked LDP runtime found; refusing to overwrite it: $LDP_RUNTIME_ROOT" >&2
+    exit 4
+  fi
+  temporary="${LDP_RUNTIME_ROOT}.tmp.$$"
+  mkdir -p "$temporary/site-packages"
+  "$PYTHON_BIN" -m pip install --no-index --no-deps \
+    --find-links "$WHEELHOUSE" --target "$temporary/site-packages" \
+    'diffusers==0.27.2' 'huggingface-hub==0.23.1' \
+    'filelock==3.19.1' 'importlib-metadata==8.7.0' \
+    'regex==2025.7.34' 'safetensors==0.6.2' 'zipp==3.23.0'
+  printf '%s\n' "$spec_hash" > "$temporary/.ldp_env_spec_sha256"
+  mv "$temporary" "$LDP_RUNTIME_ROOT"
+  if [[ -d "$STABLEWM_ROOT/.venv-ldp" && -f "$STABLEWM_ROOT/.venv-ldp/pyvenv.cfg" ]]; then
+    echo "Removing incomplete environment from the earlier failed bootstrap: $STABLEWM_ROOT/.venv-ldp"
+    rm -rf "$STABLEWM_ROOT/.venv-ldp"
+  fi
+  echo "ENV_CREATED spec_sha256=$spec_hash python=$PYTHON_BIN overlay=$LDP_OVERLAY"
 }
 
 env_witness() {
@@ -171,9 +175,13 @@ env_witness() {
 unit_test() {
   require_python
   check_upstream
+  if [[ ! -x "$TEST_PYTHON_BIN" ]]; then
+    echo "Test environment not found: $TEST_PYTHON_BIN" >&2
+    exit 2
+  fi
   cd "$STABLEWM_ROOT"
-  "$PYTHON_BIN" -m pytest -q tests/test_ldp_ogbench_data.py
-  "$PYTHON_BIN" -m py_compile \
+  "$TEST_PYTHON_BIN" -m pytest -q tests/test_ldp_ogbench_data.py
+  "$TEST_PYTHON_BIN" -m py_compile \
     scripts/data/ldp_ogbench_data.py scripts/train/ldp_ogbench.py
 }
 
