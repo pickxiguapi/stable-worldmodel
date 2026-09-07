@@ -240,7 +240,9 @@ def convert(
 
 
 def validate(
-    path: Path, expected_segment_transitions: int | None = None
+    path: Path,
+    expected_segment_transitions: int | None = None,
+    verify_source: bool = False,
 ) -> dict[str, int | float | str]:
     """Validate the training contract and print a compact summary."""
     path = path.expanduser().resolve()
@@ -391,6 +393,50 @@ def validate(
         if pixel_probe_min == pixel_probe_max or pixel_probe_std == 0.0:
             raise ValueError('Representative pixel rows are constant/collapsed')
 
+        source_verified = 0
+        if verify_source:
+            source = Path(str(dataset.attrs.get('source', '')))
+            if not source.is_file():
+                raise ValueError(f'Original source archive is missing: {source}')
+            recorded_size = int(dataset.attrs.get('source_size_bytes', -1))
+            if source.stat().st_size != recorded_size:
+                raise ValueError(
+                    f'Original source size changed: recorded={recorded_size}, '
+                    f'current={source.stat().st_size}'
+                )
+            min_transitions = int(dataset.attrs['min_transitions'])
+            with np.load(source, allow_pickle=False) as archive:
+                source_terminals = np.asarray(archive['terminals'], dtype=bool)
+                source_actions = np.asarray(
+                    archive['actions'], dtype=np.float32
+                )
+            (
+                source_rows,
+                expected_source_episode,
+                expected_source_step,
+                expected_lengths,
+            ) = segment_index(
+                source_terminals,
+                int(dataset.attrs['segment_transitions']),
+                min_transitions,
+            )
+            if int(dataset.attrs['original_rows']) != len(source_terminals):
+                raise ValueError('original_rows does not match source archive')
+            original_episodes = len(episode_bounds(source_terminals)[0])
+            if int(dataset.attrs['original_episodes']) != original_episodes:
+                raise ValueError('original_episodes does not match source archive')
+            if not np.array_equal(lengths, expected_lengths):
+                raise ValueError('ep_len does not match source segmentation')
+            if not np.array_equal(source_episode, expected_source_episode):
+                raise ValueError('source_episode does not match source archive')
+            if not np.array_equal(source_step, expected_source_step):
+                raise ValueError('source_step does not match source archive')
+            expected_actions = source_actions[source_rows]
+            expected_actions[goal_rows] = 0.0
+            if not np.array_equal(actions, expected_actions):
+                raise ValueError('Stored actions do not match source archive')
+            source_verified = 1
+
         summary: dict[str, int | float | str] = {
             'path': str(path),
             'rows': rows,
@@ -407,6 +453,7 @@ def validate(
             'pixel_probe_min': pixel_probe_min,
             'pixel_probe_max': pixel_probe_max,
             'pixel_probe_std': round(pixel_probe_std, 4),
+            'source_verified': source_verified,
         }
     print(
         'VALID ' + ' '.join(f'{key}={value}' for key, value in summary.items())
@@ -429,6 +476,7 @@ def parse_args() -> argparse.Namespace:
     validate_parser = subparsers.add_parser('validate')
     validate_parser.add_argument('paths', nargs='+', type=Path)
     validate_parser.add_argument('--segment-transitions', type=int)
+    validate_parser.add_argument('--verify-source', action='store_true')
     return parser.parse_args()
 
 
@@ -445,7 +493,7 @@ def main() -> None:
         )
     else:
         for path in args.paths:
-            validate(path, args.segment_transitions)
+            validate(path, args.segment_transitions, args.verify_source)
 
 
 if __name__ == '__main__':

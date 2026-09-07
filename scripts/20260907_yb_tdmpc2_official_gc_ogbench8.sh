@@ -108,6 +108,16 @@ validate_data() {
   done
 }
 
+audit_data() {
+  check_official_source
+  local converter="$STABLEWM_ROOT/scripts/data/convert_ogbench_npz_tdmpc2.py"
+  for i in "${!envs[@]}"; do
+    "$PYTHON_BIN" "$converter" validate \
+      --segment-transitions "$SEGMENT_TRANSITIONS" \
+      --verify-source "$(dataset_path "$i")"
+  done
+}
+
 unit_test() {
   check_official_source
   cd "$STABLEWM_ROOT"
@@ -261,6 +271,7 @@ status() {
 case "$MODE" in
   test) unit_test ;;
   validate) validate_data ;;
+  audit-data) audit_data ;;
   smoke) smoke ;;
   run-one) run_one ;;
   launch) launch_all ;;
@@ -268,7 +279,7 @@ case "$MODE" in
   queue-waiter) queue_waiter ;;
   status) status ;;
   *)
-    echo "MODE must be test, validate, smoke, run-one, launch, wait-launch, queue-waiter, or status" >&2
+    echo "MODE must be test, validate, audit-data, smoke, run-one, launch, wait-launch, queue-waiter, or status" >&2
     exit 2
     ;;
 esac
