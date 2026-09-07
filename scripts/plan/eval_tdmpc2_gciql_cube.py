@@ -1,4 +1,4 @@
-"""Evaluate a G3 GCIQL-guided TD-MPC2 checkpoint on OGBench Cube."""
+"""Evaluate G3 with either GCIQL actor-only control or MPPI."""
 
 from __future__ import annotations
 
@@ -33,6 +33,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--max-episode-steps', type=int, default=50)
     parser.add_argument('--reward-task-id', type=int, default=2)
+    parser.add_argument(
+        '--controller', choices=('actor-only', 'mppi'), default='mppi'
+    )
     parser.add_argument(
         '--visualize-info', action=argparse.BooleanOptionalAction, default=False
     )
@@ -75,6 +78,7 @@ def main() -> None:
 
     config = json.loads(config_path.read_text())
     config['compile'] = False
+    config['mpc'] = args.controller == 'mppi'
     cfg = cfg_to_dataclass(OmegaConf.create(config))
     if cfg.obs_shape != {'rgb': [6, 64, 64]}:
         raise ValueError(f'Not a 6-channel GC checkpoint: {cfg.obs_shape}')
@@ -181,16 +185,25 @@ def main() -> None:
             'max_episode_steps': args.max_episode_steps,
             'visualize_info': args.visualize_info,
         },
-        'planner': {
-            'name': 'g3_gciql_policy_centered_mppi',
-            'terminal_value': 'target_iql_value',
-            'policy_rollout_is_explicit_candidate': True,
-            'horizon': cfg.horizon,
-            'iterations': cfg.iterations,
-            'num_samples': cfg.num_samples,
-            'num_elites': cfg.num_elites,
-            'num_pi_trajs': cfg.num_pi_trajs,
-        },
+        'controller': (
+            {
+                'name': 'gciql_actor_deterministic_mean',
+                'planning': False,
+                'sampling': False,
+            }
+            if args.controller == 'actor-only'
+            else {
+                'name': 'g3_gciql_policy_centered_mppi',
+                'planning': True,
+                'terminal_value': 'target_iql_value',
+                'policy_rollout_is_explicit_candidate': True,
+                'horizon': cfg.horizon,
+                'iterations': cfg.iterations,
+                'num_samples': cfg.num_samples,
+                'num_elites': cfg.num_elites,
+                'num_pi_trajs': cfg.num_pi_trajs,
+            }
+        ),
     }
     result_path = output_dir / 'results.json'
     result_path.write_text(json.dumps(result, indent=2) + '\n')

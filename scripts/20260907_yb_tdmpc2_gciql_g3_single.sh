@@ -39,6 +39,7 @@ EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
 VISUALIZE_INFO=${VISUALIZE_INFO:-0}
+CONTROLLER=${CONTROLLER:-mppi}
 
 export PYTHONPATH="$STABLEWM_ROOT:$OGBENCH_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONUNBUFFERED=1
@@ -207,7 +208,15 @@ run_eval() {
   name=$(run_name)
   local run_dir="$RUN_ROOT/$name"
   local checkpoint="$run_dir/weights_step_${MAX_STEPS}.pt"
-  local output_dir="$EVAL_ROOT/${name}_eval${EPISODES}_s${EVAL_SEED}"
+  case "$CONTROLLER" in
+    actor-only|mppi) ;;
+    *)
+      echo "CONTROLLER must be actor-only or mppi" >&2
+      exit 2
+      ;;
+  esac
+  local controller_tag=${CONTROLLER//-/_}
+  local output_dir="$EVAL_ROOT/${name}_${controller_tag}_eval${EPISODES}_s${EVAL_SEED}"
   if [[ ! -f "$checkpoint" || ! -f "$run_dir/official_config.json" ]]; then
     echo "Missing final checkpoint/config under $run_dir" >&2
     exit 2
@@ -227,8 +236,9 @@ run_eval() {
     --checkpoint "$checkpoint" --config "$run_dir/official_config.json" \
     --output-dir "$output_dir" --label cube_single_play \
     --episodes "$EPISODES" --seed "$EVAL_SEED" \
-    --max-episode-steps "$MAX_EPISODE_STEPS" "$visualize_arg" \
-    2>&1 | tee "$EVAL_ROOT/${name}_eval${EPISODES}_s${EVAL_SEED}.log"
+    --max-episode-steps "$MAX_EPISODE_STEPS" --controller "$CONTROLLER" \
+    "$visualize_arg" \
+    2>&1 | tee "$EVAL_ROOT/${name}_${controller_tag}_eval${EPISODES}_s${EVAL_SEED}.log"
 }
 
 status() {
