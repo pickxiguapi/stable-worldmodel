@@ -12,9 +12,8 @@ def test_goal_conditioned_replay_alignment(tmp_path):
     pixels = np.zeros((rows, 64, 64, 3), dtype=np.uint8)
     for row in range(rows):
         pixels[row] = row
-    actions = np.repeat(
-        np.arange(rows, dtype=np.float32)[:, None], 2, axis=1
-    )
+    action_values = np.arange(rows, dtype=np.float32) / 10.0
+    actions = np.repeat(action_values[:, None], 2, axis=1)
     rewards = np.arange(rows, dtype=np.float32)
     terminals = np.zeros(rows, dtype=bool)
     terminals[[4, 9]] = True
@@ -52,7 +51,7 @@ def test_goal_conditioned_replay_alignment(tmp_path):
     np.testing.assert_array_equal(goal_rows[0], goal_rows[1])
     np.testing.assert_array_equal(goal_rows[1], goal_rows[2])
     np.testing.assert_array_equal(
-        action[:, :, 0].numpy(), current_rows[:-1].astype(np.float32)
+        action[:, :, 0].numpy(), current_rows[:-1].astype(np.float32) / 10.0
     )
     np.testing.assert_array_equal(
         reward[:, :, 0].numpy(), current_rows[:-1].astype(np.float32)
