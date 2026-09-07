@@ -574,6 +574,38 @@ def make_sampler(config: dict[str, Any], params: Any):
         diffusion_steps
     )
 
+    def ddpm_step(scheduler, state, model_output, timestep, noisy_sample, key):
+        """Diffusers 0.27.2 DDPM step with a scalar JAX PRNG key.
+
+        The released Flax scheduler calls ``random.split(key, num=1)`` and
+        passes the resulting shape-(1, 2) key directly to ``random.normal``.
+        JAX 0.4.33 correctly rejects that batched key.  This is the same
+        fixed-small variance update with the one-element split removed.
+        """
+        alpha_prod_t = state.common.alphas_cumprod[timestep]
+        alpha_prod_t_prev = jnp.where(
+            timestep > 0,
+            state.common.alphas_cumprod[timestep - 1],
+            jnp.array(1.0, dtype=scheduler.dtype),
+        )
+        beta_prod_t = 1 - alpha_prod_t
+        beta_prod_t_prev = 1 - alpha_prod_t_prev
+        original = (
+            noisy_sample - beta_prod_t**0.5 * model_output
+        ) / alpha_prod_t**0.5
+        if scheduler.config.clip_sample:
+            original = jnp.clip(original, -1, 1)
+        original_coeff = (
+            alpha_prod_t_prev**0.5 * state.common.betas[timestep]
+        ) / beta_prod_t
+        current_coeff = (
+            state.common.alphas[timestep] ** 0.5 * beta_prod_t_prev
+        ) / beta_prod_t
+        previous = original_coeff * original + current_coeff * noisy_sample
+        variance = scheduler._get_variance(state, timestep) ** 0.5
+        noise = jax.random.normal(key, model_output.shape, dtype=scheduler.dtype)
+        return previous + jnp.where(timestep > 0, variance * noise, 0.0)
+
     @jax.jit
     def sample(current, goal, key):
         planner_key, idm_key = jax.random.split(key)
@@ -593,9 +625,14 @@ def make_sampler(config: dict[str, Any], params: Any):
                 condition,
                 training=False,
             )
-            noisy_plan = planner_scheduler.step(
-                planner_state, noise, timestep, noisy_plan, step_key
-            ).prev_sample
+            noisy_plan = ddpm_step(
+                planner_scheduler,
+                planner_state,
+                noise,
+                timestep,
+                noisy_plan,
+                step_key,
+            )
             return noisy_plan, loop_key
 
         plan, _ = jax.lax.fori_loop(
@@ -620,9 +657,14 @@ def make_sampler(config: dict[str, Any], params: Any):
                 timestep,
                 training=False,
             )
-            noisy_actions = idm_scheduler.step(
-                idm_state, noise, timestep, noisy_actions, step_key
-            ).prev_sample
+            noisy_actions = ddpm_step(
+                idm_scheduler,
+                idm_state,
+                noise,
+                timestep,
+                noisy_actions,
+                step_key,
+            )
             return noisy_actions, loop_key
 
         actions, _ = jax.lax.fori_loop(
