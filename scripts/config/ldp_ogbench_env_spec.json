@@ -2,6 +2,7 @@
   "base": "read-only OGBench JAX CUDA environment on NVIDIA driver 580.65.06",
   "checkout": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8",
   "python": "/root/data/yyf/ogbench-new/.venv/bin/python",
+  "overlay_installer": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8/.venv/bin/python -m pip --target",
   "overlay": "/root/data/yyf/ldp-ogbench/runtime/site-packages",
   "wheelhouse": "/root/data/yyf/ldp-wheelhouse",
   "base_packages": {

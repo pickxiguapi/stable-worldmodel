@@ -139,6 +139,10 @@ setup_env() {
     echo "Read-only OGBench JAX environment is missing: $PYTHON_BIN" >&2
     exit 2
   fi
+  if [[ ! -x "$TEST_PYTHON_BIN" ]]; then
+    echo "Overlay installer environment is missing: $TEST_PYTHON_BIN" >&2
+    exit 2
+  fi
   if [[ ! -d "$WHEELHOUSE" ]]; then
     echo "Offline LDP wheelhouse is missing: $WHEELHOUSE" >&2
     exit 2
@@ -147,9 +151,13 @@ setup_env() {
     echo "Existing unmarked LDP runtime found; refusing to overwrite it: $LDP_RUNTIME_ROOT" >&2
     exit 4
   fi
-  temporary="${LDP_RUNTIME_ROOT}.tmp.$$"
+  temporary="${LDP_RUNTIME_ROOT}.building"
+  if [[ -d "$temporary" ]]; then
+    echo "Removing incomplete overlay build: $temporary"
+    rm -rf "$temporary"
+  fi
   mkdir -p "$temporary/site-packages"
-  "$PYTHON_BIN" -m pip install --no-index --no-deps \
+  "$TEST_PYTHON_BIN" -m pip install --no-index --no-deps \
     --find-links "$WHEELHOUSE" --target "$temporary/site-packages" \
     'diffusers==0.27.2' 'huggingface-hub==0.23.1' \
     'filelock==3.19.1' 'importlib-metadata==8.7.0' \
