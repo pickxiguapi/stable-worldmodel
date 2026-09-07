@@ -82,8 +82,8 @@ def test_official_source_and_config_contract():
     assert cfg.num_q == 5
     assert cfg.batch_size == 256
     assert cfg.actor_bc_coef == 1.0
-    assert cfg.vmin == -20
-    assert cfg.vmax == 0
+    assert cfg.vmin == -10
+    assert cfg.vmax == 10
     assert cfg.bin_size == 0.2
 
 

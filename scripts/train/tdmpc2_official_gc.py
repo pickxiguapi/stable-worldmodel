@@ -431,8 +431,11 @@ def build_official_config(args, action_dim, cfg_to_dataclass):
         'log_std_max': 2,
         'entropy_coef': 1e-4,
         'num_bins': 101,
-        'vmin': -20,
-        'vmax': 0,
+        # Bounds are in symlog space, so the official [-10, 10] already covers
+        # real returns of roughly [-22025, 22025]. Keep the symmetric support
+        # to make an untrained categorical critic decode near zero.
+        'vmin': -10,
+        'vmax': 10,
         'bin_size': 0.2,
         'model_size': args.model_size,
         'num_channels': 32,
