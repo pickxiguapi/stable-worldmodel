@@ -40,6 +40,7 @@ EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 MIN_FREE_MEMORY_MIB=${MIN_FREE_MEMORY_MIB:-17000}
+MIN_FREE_DISK_GIB=${MIN_FREE_DISK_GIB:-32}
 XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.18}
 COMPLETION_AUDIT_OUTPUT=${COMPLETION_AUDIT_OUTPUT:-$ARTIFACT_ROOT/audits/ldp_ogbench8_completion.json}
 
@@ -273,7 +274,17 @@ status() {
   local index name session eval_session log eval_log vae latent ldp eval
   local phase session_state eval_session_state vae_step ldp_step anomalies eval_state
   local progress metric_age_s steps_per_s eta_h
+  local disk_available_kib disk_available_gib disk_state
   date -Iseconds
+  disk_available_kib=$(df -Pk "$ARTIFACT_ROOT" | awk 'NR == 2 {print $4}')
+  disk_available_gib=$((disk_available_kib / 1024 / 1024))
+  if (( disk_available_gib < MIN_FREE_DISK_GIB )); then
+    disk_state=warn
+  else
+    disk_state=ok
+  fi
+  printf 'DISK artifact_root=%s available_gib=%s minimum_gib=%s state=%s\n' \
+    "$ARTIFACT_ROOT" "$disk_available_gib" "$MIN_FREE_DISK_GIB" "$disk_state"
   nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu \
     --format=csv,noheader,nounits
   printf 'FORMAL_TMUX_COUNT='
