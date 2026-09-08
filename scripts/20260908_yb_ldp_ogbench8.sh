@@ -245,9 +245,34 @@ launch_eval_ready() {
   done
 }
 
+metric_progress() {
+  local log=$1
+  local marker=$2
+  local target=$3
+  "$PYTHON_BIN" -c '
+import json, os, sys, time
+path, marker, target = sys.argv[1], sys.argv[2], int(sys.argv[3])
+record = None
+with open(path, errors="replace") as stream:
+    for line in stream:
+        if marker in line:
+            record = json.loads(line.split(marker, 1)[1])
+if record is None:
+    print("-1 0 -1")
+else:
+    step = int(record["step"])
+    elapsed = float(record["elapsed_seconds"])
+    speed = step / elapsed if elapsed > 0 else 0.0
+    eta = (target - step) / speed / 3600 if speed > 0 else -1.0
+    age = max(0, int(time.time() - os.path.getmtime(path)))
+    print(f"{age} {speed:.4f} {max(0.0, eta):.2f}")
+' "$log" "$marker" "$target"
+}
+
 status() {
   local index name session eval_session log eval_log vae latent ldp eval
   local phase session_state eval_session_state vae_step ldp_step anomalies eval_state
+  local progress metric_age_s steps_per_s eta_h
   date -Iseconds
   nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu \
     --format=csv,noheader,nounits
@@ -318,8 +343,15 @@ status() {
     else
       eval_session_state=missing
     fi
+    progress='-1 0 -1'
+    if [[ "$phase" == vae ]]; then
+      progress=$(metric_progress "$log" 'VAE_METRICS=' "$VAE_STEPS")
+    elif [[ "$phase" == ldp ]]; then
+      progress=$(metric_progress "$log" 'LDP_METRICS=' "$LDP_STEPS")
+    fi
+    read -r metric_age_s steps_per_s eta_h <<< "$progress"
 
-    printf 'STATUS index=%s gpu=%s dataset=%s run=%s session=%s eval_session=%s phase=%s vae_step=%s vae_ckpt=%s latent=%s ldp_step=%s ldp_ckpt=%s eval=%s anomalies=%s\n' \
+    printf 'STATUS index=%s gpu=%s dataset=%s run=%s session=%s eval_session=%s phase=%s vae_step=%s vae_ckpt=%s latent=%s ldp_step=%s ldp_ckpt=%s eval=%s anomalies=%s metric_age_s=%s steps_per_s=%s phase_eta_h=%s\n' \
       "$index" "${gpu_ids[$index]}" "${dataset_ids[$index]}" "$name" \
       "$session_state" "$eval_session_state" \
       "$phase" "$vae_step" \
@@ -327,7 +359,7 @@ status() {
       "$([[ -s "$latent" ]] && echo yes || echo no)" \
       "$ldp_step" \
       "$([[ -s "$ldp" ]] && echo yes || echo no)" \
-      "$eval_state" "$anomalies"
+      "$eval_state" "$anomalies" "$metric_age_s" "$steps_per_s" "$eta_h"
   done
 }
 
