@@ -47,6 +47,10 @@ VAE_ARCH = {
 }
 
 
+class NonstandardEvalHorizonError(ValueError):
+    """Raised when a formal evaluation tries to override the native horizon."""
+
+
 def repo_root() -> Path:
     return PROJECT_ROOT
 
@@ -1491,7 +1495,7 @@ def validate_cli_args(args: argparse.Namespace) -> None:
         and args.max_episode_steps is not None
         and not args.allow_nonstandard_horizon
     ):
-        raise ValueError(
+        raise NonstandardEvalHorizonError(
             '--max-episode-steps is forbidden for formal evaluation; '
             'omit it to use the registered OGBench horizon. '
             'Only an explicitly marked smoke test may pass '
@@ -1501,7 +1505,20 @@ def validate_cli_args(args: argparse.Namespace) -> None:
 
 def main() -> None:
     args = parser().parse_args()
-    validate_cli_args(args)
+    try:
+        validate_cli_args(args)
+    except NonstandardEvalHorizonError as exc:
+        record = {
+            'max_episode_steps': args.max_episode_steps,
+            'reason': str(exc),
+        }
+        print(
+            'EVAL_REJECTED_NONSTANDARD_HORIZON='
+            + json.dumps(record, sort_keys=True),
+            file=sys.stderr,
+            flush=True,
+        )
+        raise SystemExit(2) from None
     args.func(args)
 
 

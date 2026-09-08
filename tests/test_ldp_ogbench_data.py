@@ -10,6 +10,7 @@ from scripts.data.ldp_ogbench_data import (
     h5_take,
 )
 from scripts.train.ldp_ogbench import (
+    NonstandardEvalHorizonError,
     parser,
     task_goal_residual,
     validate_cli_args,
@@ -172,7 +173,9 @@ def test_formal_eval_rejects_nonstandard_horizon():
         '50',
     ]
     args = parser().parse_args(base)
-    with np.testing.assert_raises_regex(ValueError, 'forbidden for formal evaluation'):
+    with np.testing.assert_raises_regex(
+        NonstandardEvalHorizonError, 'forbidden for formal evaluation'
+    ):
         validate_cli_args(args)
 
     smoke_args = parser().parse_args(base + ['--allow-nonstandard-horizon'])
