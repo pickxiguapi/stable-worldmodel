@@ -194,6 +194,54 @@ def restore_optimizer_schedule_step(opt_state: Any, step: int) -> Any:
     return restored
 
 
+def resolve_vae_adapter_commit(
+    run_dir: Path, config: dict[str, Any]
+) -> tuple[str, str]:
+    """Resolve the code commit that actually launched a VAE training run."""
+
+    def validate(commit: Any, label: str) -> str:
+        if not (
+            isinstance(commit, str)
+            and len(commit) == 40
+            and all(character in '0123456789abcdef' for character in commit)
+        ):
+            raise RuntimeError(f'Invalid {label}: {commit!r}')
+        return commit
+
+    if config.get('adapter_commit') is not None:
+        return validate(config['adapter_commit'], 'VAE adapter commit'), 'config.json'
+
+    provenance_path = run_dir / 'provenance.json'
+    if not provenance_path.is_file():
+        raise RuntimeError(
+            'Legacy VAE config lacks adapter_commit and provenance.json is missing'
+        )
+    provenance = json.loads(provenance_path.read_text())
+    expected = {
+        'kind': 'ogbench_ldp_pipeline_provenance',
+        'dataset': str(Path(config['source']).expanduser().resolve()),
+        'dataset_size_bytes': int(config['source_size_bytes']),
+        'upstream_ldp_commit': config['upstream_commit'],
+    }
+    mismatches = {
+        key: (provenance.get(key), value)
+        for key, value in expected.items()
+        if provenance.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(f'Legacy VAE provenance mismatch: {mismatches}')
+    commit = validate(provenance.get('vae_adapter_commit'), 'VAE provenance commit')
+    process_commit = provenance.get('evidence', {}).get(
+        'server_checkout_at_process_start'
+    )
+    if process_commit != commit:
+        raise RuntimeError(
+            'Legacy VAE provenance disagrees with process-start checkout: '
+            f'{process_commit!r} != {commit!r}'
+        )
+    return commit, 'provenance.json'
+
+
 def make_vae():
     from diffusers import FlaxAutoencoderKL
 
@@ -409,6 +457,9 @@ def load_vae_run(run_dir: Path):
         raise RuntimeError('VAE checkpoint upstream commit mismatch')
     if config['vae_arch'] != VAE_ARCH:
         raise RuntimeError('VAE architecture mismatch')
+    vae_adapter_commit, commit_source = resolve_vae_adapter_commit(run_dir, config)
+    config['adapter_commit'] = vae_adapter_commit
+    config['adapter_commit_source'] = commit_source
     checkpoint = load_msgpack(run_dir / 'checkpoint.msgpack')
     return make_vae(), checkpoint['ema_params'], config
 
@@ -529,6 +580,13 @@ def encode(args: argparse.Namespace) -> None:
             destination.attrs['vae_dir'] = str(args.vae_dir.expanduser().resolve())
             destination.attrs['vae_source_size_bytes'] = vae_config['source_size_bytes']
             destination.attrs['upstream_commit'] = UPSTREAM_COMMIT
+            destination.attrs['vae_adapter_commit'] = vae_config['adapter_commit']
+            destination.attrs['vae_adapter_commit_source'] = vae_config[
+                'adapter_commit_source'
+            ]
+            destination.attrs['encoding_adapter_commit'] = encoding_adapter_commit
+            # Retained for compatibility with latent files created before the
+            # two adapter stages were named explicitly.
             destination.attrs['adapter_commit'] = encoding_adapter_commit
         temporary.replace(output)
         write_json(output.with_suffix('.vae_validation.json'), validation)
@@ -623,6 +681,11 @@ def train_ldp(args: argparse.Namespace) -> None:
     commit = verify_upstream()
     data = OGBenchLDPData(args.source, args.latents)
     data.load_training_arrays()
+    with h5py.File(data.latent_path, 'r') as latent_file:
+        vae_adapter_commit = str(latent_file.attrs['vae_adapter_commit'])
+        encoding_adapter_commit = str(
+            latent_file.attrs['encoding_adapter_commit']
+        )
     output = args.output_dir.expanduser().resolve()
     planner, idm = make_ldp_models(data.latent_dim, data.action_dim)
     planner_scheduler, planner_scheduler_state, idm_scheduler, idm_scheduler_state = (
@@ -657,6 +720,8 @@ def train_ldp(args: argparse.Namespace) -> None:
         'kind': 'goal_conditioned_ogbench_ldp',
         'upstream_commit': commit,
         'adapter_commit': adapter_commit(),
+        'vae_adapter_commit': vae_adapter_commit,
+        'encoding_adapter_commit': encoding_adapter_commit,
         'goal_conditioning': 'planner_global_condition_current_plus_final_goal',
         'idm_conditioning': 'adjacent_latent_transition_only',
         'source': str(data.source_path),
@@ -1291,6 +1356,8 @@ def evaluate(args: argparse.Namespace) -> None:
         'method': 'goal_conditioned_latent_diffusion_planning',
         'upstream_commit': UPSTREAM_COMMIT,
         'training_adapter_commit': config.get('adapter_commit'),
+        'vae_adapter_commit': config.get('vae_adapter_commit'),
+        'encoding_adapter_commit': config.get('encoding_adapter_commit'),
         'evaluation_adapter_commit': evaluation_adapter_commit,
         'ogbench': ogbench_provenance,
         'checkpoint': str(run_dir / 'checkpoint.msgpack'),
