@@ -39,6 +39,7 @@ EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
+ALLOW_NONSTANDARD_HORIZON=${ALLOW_NONSTANDARD_HORIZON:-0}
 MIN_FREE_MEMORY_MIB=${MIN_FREE_MEMORY_MIB:-17000}
 MIN_FREE_DISK_GIB=${MIN_FREE_DISK_GIB:-32}
 XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.18}
@@ -120,6 +121,7 @@ run_base() {
   PRED_HORIZON="$PRED_HORIZON" ACTION_HORIZON="$ACTION_HORIZON" \
   DIFFUSION_STEPS="$DIFFUSION_STEPS" EPISODES="$EPISODES" \
   EVAL_SEED="$EVAL_SEED" MAX_EPISODE_STEPS="$MAX_EPISODE_STEPS" \
+  ALLOW_NONSTANDARD_HORIZON="$ALLOW_NONSTANDARD_HORIZON" \
   MODE="$child_mode" bash "$TASK_SCRIPT"
 }
 
@@ -209,6 +211,14 @@ eval_one() {
   run_base "$TASK_INDEX" eval
 }
 
+eval_result_valid() {
+  local index=$1
+  local result=$2
+  "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["environment"]; assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert r["total_episodes"]==5*int(sys.argv[3]); assert r["seed"]==int(sys.argv[4]); assert len(r["tasks"])==5; assert [t["task_id"] for t in r["tasks"]]==[1,2,3,4,5]; assert all(t["episodes"]==int(sys.argv[3]) for t in r["tasks"]); assert e["id"]==sys.argv[5]; assert e["uses_registered_horizon"] is True; assert e["max_episode_steps"]==int(sys.argv[6])' \
+    "$result" "${dataset_ids[$index]}" "$EPISODES" "$EVAL_SEED" \
+    "${env_ids[$index]}" "${native_horizons[$index]}" 2>/dev/null
+}
+
 launch_eval_ready() {
   local index name formal_session eval_session formal_log eval_log ldp eval
   local eval_dir quarantine
@@ -221,9 +231,7 @@ launch_eval_ready() {
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
     eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
     if [[ -s "$eval" ]]; then
-      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["environment"]; assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert r["total_episodes"]==5*int(sys.argv[3]); assert r["seed"]==int(sys.argv[4]); assert len(r["tasks"])==5; assert e["id"]==sys.argv[5]; assert e["uses_registered_horizon"] is True; assert e["max_episode_steps"]==int(sys.argv[6])' \
-        "$eval" "${dataset_ids[$index]}" "$EPISODES" "$EVAL_SEED" \
-        "${env_ids[$index]}" "${native_horizons[$index]}" 2>/dev/null; then
+      if eval_result_valid "$index" "$eval"; then
         echo "EVAL_ALREADY_COMPLETE index=$index result=$eval"
         continue
       fi
@@ -254,7 +262,7 @@ launch_eval_ready() {
       continue
     fi
     tmux new-session -d -s "$eval_session" \
-      "cd '$STABLEWM_ROOT' && MODE=eval-one TASK_INDEX='$index' DATASET_ROOT='$DATASET_ROOT' ARTIFACT_ROOT='$ARTIFACT_ROOT' CORE_LABEL='$CORE_LABEL' SEED='$SEED' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' EVAL_TASK_IDS='$EVAL_TASK_IDS' LDP_RUNTIME_ROOT='$LDP_RUNTIME_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' XLA_PYTHON_CLIENT_MEM_FRACTION='$XLA_PYTHON_CLIENT_MEM_FRACTION' bash '$0' 2>&1 | tee '$eval_log'"
+      "cd '$STABLEWM_ROOT' && MODE=eval-one TASK_INDEX='$index' DATASET_ROOT='$DATASET_ROOT' ARTIFACT_ROOT='$ARTIFACT_ROOT' CORE_LABEL='$CORE_LABEL' SEED='$SEED' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' EVAL_TASK_IDS='$EVAL_TASK_IDS' MAX_EPISODE_STEPS='' ALLOW_NONSTANDARD_HORIZON='0' LDP_RUNTIME_ROOT='$LDP_RUNTIME_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' XLA_PYTHON_CLIENT_MEM_FRACTION='$XLA_PYTHON_CLIENT_MEM_FRACTION' bash '$0' 2>&1 | tee '$eval_log'"
     echo "EVAL_LAUNCHED index=$index gpu=${gpu_ids[$index]} session=$eval_session log=$eval_log"
   done
 }
@@ -348,8 +356,7 @@ status() {
     fi
     eval_state=no
     if [[ -s "$eval" ]]; then
-      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert len(r["tasks"])==5' \
-        "$eval" "${dataset_ids[$index]}" "$EPISODES" 2>/dev/null; then
+      if eval_result_valid "$index" "$eval"; then
         phase=complete
         eval_state=valid
       else
