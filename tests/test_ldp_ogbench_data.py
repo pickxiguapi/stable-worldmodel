@@ -21,11 +21,16 @@ def make_data(source_path: Path, latent_path: Path) -> None:
     actions = np.repeat(np.arange(rows, dtype=np.float32)[:, None], 2, axis=1)
     actions = actions / actions.max()
     actions[offsets + lengths - 1] = 0.0
+    rewards = np.full(rows, -1.0, dtype=np.float32)
+    goal_rows = offsets + lengths - 1
+    rewards[goal_rows - 1] = 0.0
+    rewards[goal_rows] = 0.0
     terminals = np.zeros(rows, dtype=bool)
-    terminals[offsets + lengths - 1] = True
+    terminals[goal_rows] = True
     with h5py.File(source_path, 'w') as source:
         source.create_dataset('pixels', data=pixels)
         source.create_dataset('action', data=actions)
+        source.create_dataset('reward', data=rewards)
         source.create_dataset('terminal', data=terminals)
         source.create_dataset('ep_offset', data=offsets)
         source.create_dataset('ep_len', data=lengths)

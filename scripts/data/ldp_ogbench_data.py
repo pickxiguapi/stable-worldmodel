@@ -56,7 +56,14 @@ class OGBenchLDPData:
             else None
         )
         with h5py.File(self.source_path, 'r') as source:
-            required = {'pixels', 'action', 'terminal', 'ep_offset', 'ep_len'}
+            required = {
+                'pixels',
+                'action',
+                'reward',
+                'terminal',
+                'ep_offset',
+                'ep_len',
+            }
             missing = sorted(required - set(source.keys()))
             if missing:
                 raise ValueError(f'Source dataset missing keys: {missing}')
@@ -78,7 +85,7 @@ class OGBenchLDPData:
                 source.attrs['segment_transitions']
             )
             terminals = source['terminal'][:].astype(bool, copy=False)
-            rewards = source['reward'][:] if 'reward' in source else None
+            rewards = source['reward'][:]
             source_episodes = (
                 source['source_episode'][:]
                 if 'source_episode' in source
@@ -102,11 +109,14 @@ class OGBenchLDPData:
         expected_terminals[self.offsets + self.lengths - 1] = True
         if not np.array_equal(terminals, expected_terminals):
             raise ValueError('terminal rows disagree with episode metadata')
-        if rewards is not None:
-            if not np.all(rewards[~expected_terminals] == -1.0):
-                raise ValueError('non-terminal rewards must be -1')
-            if not np.all(rewards[expected_terminals] == 0.0):
-                raise ValueError('terminal goal rewards must be 0')
+        goal_rows = self.offsets + self.lengths - 1
+        expected_zero_rewards = np.zeros(self.source_rows, dtype=bool)
+        expected_zero_rewards[goal_rows - 1] = True
+        expected_zero_rewards[goal_rows] = True
+        if not np.all(rewards[~expected_zero_rewards] == -1.0):
+            raise ValueError('non-goal transition rewards must be -1')
+        if not np.all(rewards[expected_zero_rewards] == 0.0):
+            raise ValueError('goal-transition and dummy-row rewards must be 0')
 
         self.rows = self.source_rows
         self.latent_dim: int | None = None
