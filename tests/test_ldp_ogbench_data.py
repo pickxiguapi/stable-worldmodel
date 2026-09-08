@@ -3,13 +3,17 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from scripts.audit_ldp_ogbench8 import TaskSpec, validate_eval_result
 from scripts.data.ldp_ogbench_data import (
     OGBenchLDPData,
     REWARD_SCHEME,
     h5_take,
 )
-from scripts.train.ldp_ogbench import task_goal_residual
-from scripts.audit_ldp_ogbench8 import TaskSpec, validate_eval_result
+from scripts.train.ldp_ogbench import (
+    parser,
+    task_goal_residual,
+    validate_cli_args,
+)
 
 
 def make_data(source_path: Path, latent_path: Path) -> None:
@@ -151,6 +155,28 @@ def test_task_goal_residual_uses_generic_official_reward():
     assert task_goal_residual(FakeEnv([False, True, False])) == 2.0
     assert task_goal_residual(FakeEnv(([True], [False, True], True, False))) == 2.0
     assert task_goal_residual(FakeEnv([True, True])) == 0.0
+
+
+def test_formal_eval_rejects_nonstandard_horizon():
+    base = [
+        'eval',
+        '--run-dir',
+        'ldp',
+        '--vae-dir',
+        'vae',
+        '--output-dir',
+        'eval',
+        '--dataset-id',
+        'visual-cube-single-play-v0',
+        '--max-episode-steps',
+        '50',
+    ]
+    args = parser().parse_args(base)
+    with np.testing.assert_raises_regex(ValueError, 'forbidden for formal evaluation'):
+        validate_cli_args(args)
+
+    smoke_args = parser().parse_args(base + ['--allow-nonstandard-horizon'])
+    validate_cli_args(smoke_args)
 
 
 def test_completion_audit_checks_raw_episode_results():

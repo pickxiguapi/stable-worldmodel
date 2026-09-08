@@ -1457,12 +1457,16 @@ def parser() -> argparse.ArgumentParser:
     eval_parser.add_argument('--seed', type=int, default=42)
     eval_parser.add_argument('--task-ids', type=int, nargs='+', default=[1, 2, 3, 4, 5])
     eval_parser.add_argument('--max-episode-steps', type=int)
+    eval_parser.add_argument(
+        '--allow-nonstandard-horizon',
+        action='store_true',
+        help='Allow --max-episode-steps for explicitly marked smoke tests only.',
+    )
     eval_parser.set_defaults(func=evaluate)
     return root
 
 
-def main() -> None:
-    args = parser().parse_args()
+def validate_cli_args(args: argparse.Namespace) -> None:
     positive = [
         name
         for name in (
@@ -1482,6 +1486,22 @@ def main() -> None:
         raise ValueError('action_horizon cannot exceed pred_horizon')
     if hasattr(args, 'pred_horizon') and args.pred_horizon % 4:
         raise ValueError('pred_horizon must be divisible by 4 for the planner U-Net')
+    if (
+        getattr(args, 'command', None) == 'eval'
+        and args.max_episode_steps is not None
+        and not args.allow_nonstandard_horizon
+    ):
+        raise ValueError(
+            '--max-episode-steps is forbidden for formal evaluation; '
+            'omit it to use the registered OGBench horizon. '
+            'Only an explicitly marked smoke test may pass '
+            '--allow-nonstandard-horizon.'
+        )
+
+
+def main() -> None:
+    args = parser().parse_args()
+    validate_cli_args(args)
     args.func(args)
 
 

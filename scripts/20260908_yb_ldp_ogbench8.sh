@@ -64,6 +64,7 @@ env_ids=(
   visual-cube-triple-v0
   visual-scene-v0
 )
+native_horizons=(200 500 1000 750 200 500 1000 750)
 task_tags=(
   cube_single
   cube_double_play
@@ -210,6 +211,7 @@ eval_one() {
 
 launch_eval_ready() {
   local index name formal_session eval_session formal_log eval_log ldp eval
+  local eval_dir quarantine
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     formal_session="ldp_${name:0:70}"
@@ -219,13 +221,24 @@ launch_eval_ready() {
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
     eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
     if [[ -s "$eval" ]]; then
-      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert len(r["tasks"])==5' \
-        "$eval" "${dataset_ids[$index]}" "$EPISODES" 2>/dev/null; then
+      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["environment"]; assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert r["total_episodes"]==5*int(sys.argv[3]); assert r["seed"]==int(sys.argv[4]); assert len(r["tasks"])==5; assert e["id"]==sys.argv[5]; assert e["uses_registered_horizon"] is True; assert e["max_episode_steps"]==int(sys.argv[6])' \
+        "$eval" "${dataset_ids[$index]}" "$EPISODES" "$EVAL_SEED" \
+        "${env_ids[$index]}" "${native_horizons[$index]}" 2>/dev/null; then
         echo "EVAL_ALREADY_COMPLETE index=$index result=$eval"
-      else
-        echo "EVAL_INVALID_REQUIRES_INSPECTION index=$index result=$eval" >&2
+        continue
       fi
-      continue
+      if tmux has-session -t "$formal_session" 2>/dev/null; then
+        echo "EVAL_INVALID_WAIT_FORMAL index=$index result=$eval" >&2
+        continue
+      fi
+      if tmux has-session -t "$eval_session" 2>/dev/null; then
+        echo "EVAL_INVALID_WAIT_EVAL_SESSION index=$index result=$eval" >&2
+        continue
+      fi
+      eval_dir=${eval%/results.json}
+      quarantine="${eval_dir}_invalid_$(date +%Y%m%dT%H%M%S)"
+      mv "$eval_dir" "$quarantine"
+      echo "EVAL_INVALID_QUARANTINED index=$index from=$eval_dir to=$quarantine" >&2
     fi
     if tmux has-session -t "$formal_session" 2>/dev/null; then
       echo "EVAL_WAIT_FORMAL index=$index session=$formal_session"

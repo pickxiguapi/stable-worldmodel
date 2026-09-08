@@ -48,6 +48,7 @@ EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
+ALLOW_NONSTANDARD_HORIZON=${ALLOW_NONSTANDARD_HORIZON:-0}
 DEFAULT_ENV_ID=${DATASET_ID/-play/}
 DEFAULT_ENV_ID=${DEFAULT_ENV_ID/-noisy/}
 ENV_ID=${ENV_ID:-$DEFAULT_ENV_ID}
@@ -340,6 +341,9 @@ run_eval() {
   local horizon_args=()
   if [[ -n "$MAX_EPISODE_STEPS" ]]; then
     horizon_args=(--max-episode-steps "$MAX_EPISODE_STEPS")
+    if [[ "$ALLOW_NONSTANDARD_HORIZON" == 1 ]]; then
+      horizon_args+=(--allow-nonstandard-horizon)
+    fi
   fi
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py eval \
     --run-dir "$LDP_DIR" --vae-dir "$VAE_DIR" --output-dir "$EVAL_DIR" \
@@ -384,7 +388,8 @@ smoke() {
     VAE_STEPS=2 VAE_BATCH_SIZE=2 VAE_LOG_EVERY=1 VAE_SAVE_EVERY=2 \
     ENCODE_BATCH_SIZE=64 MAX_ENCODE_EPISODES=40 MAX_VAE_VALIDATION_MSE=1.0 \
     LDP_STEPS=2 LDP_BATCH_SIZE=2 LDP_LOG_EVERY=1 LDP_SAVE_EVERY=2 \
-    EPISODES=1 EVAL_TASK_IDS='1 2 3 4 5' MAX_EPISODE_STEPS=1 pipeline_smoke
+    EPISODES=1 EVAL_TASK_IDS='1 2 3 4 5' MAX_EPISODE_STEPS=1 \
+    ALLOW_NONSTANDARD_HORIZON=1 pipeline_smoke
   echo "SMOKE_COMPLETE=$smoke_root"
 }
 
