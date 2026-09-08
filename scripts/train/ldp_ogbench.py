@@ -1023,7 +1023,6 @@ def make_official_eval_env(
     ogbench_module, dataset_id: str, env_id: str, max_episode_steps: int | None
 ):
     env_kwargs: dict[str, Any] = {
-        'render_mode': 'rgb_array',
         'height': 64,
         'width': 64,
         'visualize_info': False,
