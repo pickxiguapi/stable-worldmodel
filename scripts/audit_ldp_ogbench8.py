@@ -410,7 +410,7 @@ def validate_artifact_binding(
                     str(resolved_root),
                     'status',
                     '--porcelain',
-                    '--untracked-files=no',
+                    '--untracked-files=all',
                 ],
                 text=True,
             ).strip()
@@ -419,6 +419,22 @@ def validate_artifact_binding(
         else:
             require(actual_commit == OGBENCH_COMMIT, 'OGBench checkout commit mismatch')
             require(not actual_dirty, 'OGBench checkout is dirty')
+            try:
+                tracked_module = subprocess.check_output(
+                    [
+                        'git',
+                        '-C',
+                        str(resolved_root),
+                        'ls-files',
+                        '--error-unmatch',
+                        str(resolved_module.relative_to(resolved_root)),
+                    ],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+            except (ValueError, subprocess.CalledProcessError):
+                tracked_module = ''
+            require(bool(tracked_module), 'imported OGBench module is not Git-tracked')
             require(ogbench.get('commit') == actual_commit, 'reported OGBench commit mismatch')
             require(ogbench.get('origin') == actual_origin, 'reported OGBench origin mismatch')
             require(str(resolved_root) == str(Path(root)), 'reported OGBench root is not canonical')
@@ -480,10 +496,19 @@ def audit_task(
             bool(re.fullmatch(r'[0-9a-f]{64}', str(vae_config.get('source_sha256', '')))),
             'VAE source hash missing or invalid',
         )
+        source_hash_stage = vae_config.get('source_hash_recorded_stage')
         audit.require(
-            vae_config.get('source_hash_recorded_stage')
-            == 'pre_latent_encoding_after_vae_completion',
+            source_hash_stage
+            in {
+                'pre_vae_training',
+                'vae_resume_preflight',
+                'pre_latent_encoding_after_vae_completion',
+            },
             'VAE source hash recording stage mismatch',
+        )
+        audit.warn(
+            source_hash_stage == 'pre_vae_training',
+            'legacy VAE run did not record source hash before initial training',
         )
         audit.require(vae_config.get('steps') == 300_000, 'VAE steps config mismatch')
         audit.require(vae_config.get('batch_size') == 128, 'VAE batch size mismatch')

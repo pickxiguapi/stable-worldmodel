@@ -117,7 +117,7 @@ def verify_ogbench() -> dict[str, str]:
             f'Expected official OGBench {OGBENCH_COMMIT}, found {commit}'
         )
     dirty = subprocess.check_output(
-        ['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'],
+        ['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=all'],
         text=True,
     ).strip()
     if dirty:
@@ -136,11 +136,16 @@ def bind_ogbench_import(
     module_file = Path(ogbench_module.__file__).resolve()
     root = Path(provenance['root']).resolve()
     try:
-        module_file.relative_to(root)
+        relative_module = module_file.relative_to(root)
     except ValueError as exc:
         raise RuntimeError(
             f'Imported ogbench module {module_file} is outside verified checkout {root}'
         ) from exc
+    subprocess.check_call(
+        ['git', '-C', str(root), 'ls-files', '--error-unmatch', str(relative_module)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     return {**provenance, 'module_file': str(module_file)}
 
 
@@ -313,6 +318,8 @@ def train_vae(args: argparse.Namespace) -> None:
         'adapter_commit': adapter_commit(),
         'source': str(data.source_path),
         'source_size_bytes': data.source_path.stat().st_size,
+        'source_sha256': file_sha256(data.source_path),
+        'source_hash_recorded_stage': 'pre_vae_training',
         'steps': args.steps,
         'batch_size': args.batch_size,
         'learning_rate': args.learning_rate,
@@ -327,7 +334,17 @@ def train_vae(args: argparse.Namespace) -> None:
     if args.resume:
         if not output.is_dir():
             raise FileNotFoundError(f'VAE resume directory does not exist: {output}')
-        existing_config = json.loads((output / 'config.json').read_text())
+        config_path = output / 'config.json'
+        existing_config = json.loads(config_path.read_text())
+        if 'source_sha256' not in existing_config:
+            existing_config['source_sha256'] = config['source_sha256']
+            existing_config[
+                'source_hash_recorded_stage'
+            ] = 'vae_resume_preflight'
+            write_json(config_path, existing_config)
+        config['source_hash_recorded_stage'] = existing_config.get(
+            'source_hash_recorded_stage'
+        )
         mismatches = {
             key: (existing_config.get(key), value)
             for key, value in config.items()
@@ -517,9 +534,10 @@ def encode(args: argparse.Namespace) -> None:
     if recorded_source_sha256 not in (None, source_sha256):
         raise RuntimeError('VAE config source hash does not match the source dataset')
     persisted_vae_config['source_sha256'] = source_sha256
-    persisted_vae_config[
-        'source_hash_recorded_stage'
-    ] = 'pre_latent_encoding_after_vae_completion'
+    persisted_vae_config.setdefault(
+        'source_hash_recorded_stage',
+        'pre_latent_encoding_after_vae_completion',
+    )
     write_json(vae_config_path, persisted_vae_config)
     vae_config_sha256 = file_sha256(vae_config_path)
     output = args.output.expanduser().resolve()
