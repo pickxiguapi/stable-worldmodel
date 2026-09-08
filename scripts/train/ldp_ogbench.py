@@ -157,6 +157,43 @@ def load_msgpack(path: Path) -> Any:
     return serialization.msgpack_restore(path.read_bytes())
 
 
+def restore_optimizer_schedule_step(opt_state: Any, step: int) -> Any:
+    """Advance only Optax schedule counters for a legacy checkpoint.
+
+    Legacy checkpoints do not contain Adam moments, so Adam's bias-correction
+    counter must restart with the freshly initialized moments.  The learning
+    rate schedule is different: it must continue from the saved training step
+    or a resumed run would repeat warmup and the early high-learning-rate
+    regime.  Optax stores that counter in ``ScaleByScheduleState``.
+    """
+    if step < 0:
+        raise ValueError('optimizer schedule step must be non-negative')
+    replacements = 0
+
+    def visit(value: Any) -> Any:
+        nonlocal replacements
+        if (
+            type(value).__name__ == 'ScaleByScheduleState'
+            and hasattr(value, '_replace')
+            and hasattr(value, 'count')
+        ):
+            replacements += 1
+            return value._replace(count=value.count + step)
+        if type(value) is tuple:
+            return tuple(visit(item) for item in value)
+        if type(value) is list:
+            return [visit(item) for item in value]
+        return value
+
+    restored = visit(opt_state)
+    if replacements != 1:
+        raise RuntimeError(
+            'Expected exactly one Optax ScaleByScheduleState, '
+            f'found {replacements}'
+        )
+    return restored
+
+
 def make_vae():
     from diffusers import FlaxAutoencoderKL
 
@@ -279,6 +316,7 @@ def train_vae(args: argparse.Namespace) -> None:
                 exact_resume = True
             else:
                 # Legacy checkpoints predate optimizer/RNG persistence.
+                opt_state = restore_optimizer_schedule_step(opt_state, start_step)
                 rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), start_step)
         resume_event = {
             'kind': 'vae_resume',
@@ -774,6 +812,7 @@ def train_ldp(args: argparse.Namespace) -> None:
                     exact_resume = True
         if not exact_resume and not stateful_checkpoint:
             opt_state = optimizer.init(params)
+            opt_state = restore_optimizer_schedule_step(opt_state, start_step)
             train_rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), start_step)
             validation_rng = jax.random.fold_in(
                 jax.random.PRNGKey(args.seed + 1_000_003), start_step
