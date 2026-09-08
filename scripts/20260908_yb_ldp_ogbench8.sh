@@ -183,23 +183,67 @@ launch_missing() {
 }
 
 status() {
-  local index name vae latent ldp eval
+  local index name session log vae latent ldp eval
+  local phase session_state vae_step ldp_step anomalies
   date -Iseconds
   nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu \
     --format=csv,noheader,nounits
-  tmux list-sessions -F '#{session_name}' 2>/dev/null | grep '^ldp_' || true
+  printf 'FORMAL_TMUX_COUNT='
+  tmux list-sessions -F '#{session_name}' 2>/dev/null \
+    | grep -c '^ldp_ldp_' || true
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
+    session="ldp_${name:0:70}"
+    log="$ARTIFACT_ROOT/$name.log"
     vae="$ARTIFACT_ROOT/runs/${name}_vae/checkpoint.msgpack"
     latent="$ARTIFACT_ROOT/data/${name}_latents.h5"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
     eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
-    printf 'STATUS index=%s gpu=%s run=%s vae=%s latent=%s ldp=%s eval=%s\n' \
-      "$index" "${gpu_ids[$index]}" "$name" \
+
+    vae_step=0
+    ldp_step=0
+    anomalies=0
+    phase=starting
+    if [[ -f "$log" ]]; then
+      vae_step=$(grep 'VAE_METRICS=' "$log" | tail -1 \
+        | sed -n 's/.*"step": \([0-9][0-9]*\).*/\1/p' || true)
+      ldp_step=$(grep 'LDP_METRICS=' "$log" | tail -1 \
+        | sed -n 's/.*"step": \([0-9][0-9]*\).*/\1/p' || true)
+      vae_step=${vae_step:-0}
+      ldp_step=${ldp_step:-0}
+      anomalies=$(grep -Ec \
+        'Traceback|CUDA out of memory|NaN|nan|Fatal|ERROR' "$log" || true)
+      if grep -q 'VAE_METRICS=' "$log"; then
+        phase=vae
+      fi
+      if grep -q 'VAE_COMPLETE=' "$log"; then
+        phase=encode
+      fi
+      if grep -q 'LATENT_COMPLETE=' "$log"; then
+        phase=ldp
+      fi
+      if grep -q 'LDP_COMPLETE=' "$log"; then
+        phase=eval
+      fi
+    fi
+    if [[ -s "$eval" ]]; then
+      phase=complete
+    fi
+    if tmux has-session -t "$session" 2>/dev/null; then
+      session_state=live
+    else
+      session_state=missing
+    fi
+
+    printf 'STATUS index=%s gpu=%s dataset=%s run=%s session=%s phase=%s vae_step=%s vae_ckpt=%s latent=%s ldp_step=%s ldp_ckpt=%s eval=%s anomalies=%s\n' \
+      "$index" "${gpu_ids[$index]}" "${dataset_ids[$index]}" "$name" \
+      "$session_state" \
+      "$phase" "$vae_step" \
       "$([[ -s "$vae" ]] && echo yes || echo no)" \
       "$([[ -s "$latent" ]] && echo yes || echo no)" \
+      "$ldp_step" \
       "$([[ -s "$ldp" ]] && echo yes || echo no)" \
-      "$([[ -s "$eval" ]] && echo yes || echo no)"
+      "$([[ -s "$eval" ]] && echo yes || echo no)" "$anomalies"
   done
 }
 
