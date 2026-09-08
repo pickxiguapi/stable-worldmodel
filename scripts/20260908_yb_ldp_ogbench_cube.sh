@@ -16,11 +16,13 @@ DATASET_ROOT=${DATASET_ROOT:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmp
 DATASET_ID=${DATASET_ID:-visual-cube-single-play-v0}
 SOURCE_DATASET=${SOURCE_DATASET:-$DATASET_ROOT/$DATASET_ID.h5}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/root/data/yyf/ldp-ogbench}
-LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-$ARTIFACT_ROOT/runtime}
+LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-$ARTIFACT_ROOT/runtime-v2}
 LDP_OVERLAY=${LDP_OVERLAY:-$LDP_RUNTIME_ROOT/site-packages}
 WHEELHOUSE=${WHEELHOUSE:-/root/data/yyf/ldp-wheelhouse}
 RUN_LABEL=${RUN_LABEL:-gc_finalgoal_h8_a4_ds100}
-OGBENCH_ROOT=${OGBENCH_ROOT:-/root/data/yyf/ogbench-eval-main-20260830}
+OGBENCH_ROOT=${OGBENCH_ROOT:-/root/data/yyf/ogbench-official-1d414099}
+OGBENCH_REPOSITORY=${OGBENCH_REPOSITORY:-https://github.com/seohongpark/ogbench.git}
+OGBENCH_COMMIT=${OGBENCH_COMMIT:-1d4140997f60c52c6fb0702ec100dc988b18c548}
 OGBENCH_SITE_PACKAGES=${OGBENCH_SITE_PACKAGES:-$OGBENCH_ROOT/.venv/lib/python3.10/site-packages}
 EGL_RUNTIME_ROOT=${EGL_RUNTIME_ROOT:-$ARTIFACT_ROOT/.runtime/egl}
 UPSTREAM_COMMIT=${UPSTREAM_COMMIT:-a26cbf1d2c0aec7adc5d9746f47831b162a41c0c}
@@ -44,7 +46,8 @@ ACTION_HORIZON=${ACTION_HORIZON:-4}
 DIFFUSION_STEPS=${DIFFUSION_STEPS:-100}
 EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
-MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
+EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
+MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 DEFAULT_ENV_ID=${DATASET_ID/-play/}
 DEFAULT_ENV_ID=${DEFAULT_ENV_ID/-noisy/}
 ENV_ID=${ENV_ID:-$DEFAULT_ENV_ID}
@@ -52,7 +55,6 @@ DEFAULT_TASK_TAG=${DATASET_ID#visual-}
 DEFAULT_TASK_TAG=${DEFAULT_TASK_TAG%-v0}
 DEFAULT_TASK_TAG=${DEFAULT_TASK_TAG//-/_}
 TASK_TAG=${TASK_TAG:-$DEFAULT_TASK_TAG}
-REWARD_TASK_ID=${REWARD_TASK_ID:-2}
 RESUME=${RESUME:-0}
 
 RUN_NAME="ldp_${TASK_TAG}_${RUN_LABEL}_s${SEED}"
@@ -91,14 +93,52 @@ check_upstream() {
   fi
 }
 
+setup_ogbench() {
+  local temporary="${OGBENCH_ROOT}.building"
+  if [[ ! -d "$OGBENCH_ROOT/.git" ]]; then
+    mkdir -p "$(dirname "$OGBENCH_ROOT")"
+    if [[ -e "$temporary" ]]; then
+      echo "Incomplete OGBench checkout already exists: $temporary" >&2
+      exit 4
+    fi
+    git clone --filter=blob:none "$OGBENCH_REPOSITORY" "$temporary"
+    git -C "$temporary" checkout --detach "$OGBENCH_COMMIT"
+    mv "$temporary" "$OGBENCH_ROOT"
+  fi
+  local actual origin
+  actual=$(git -C "$OGBENCH_ROOT" rev-parse HEAD)
+  origin=$(git -C "$OGBENCH_ROOT" remote get-url origin)
+  if [[ "$actual" != "$OGBENCH_COMMIT" ]]; then
+    echo "OGBench commit mismatch: expected $OGBENCH_COMMIT, found $actual" >&2
+    exit 2
+  fi
+  if [[ "${origin%.git}" != "${OGBENCH_REPOSITORY%.git}" ]]; then
+    echo "OGBench origin mismatch: expected $OGBENCH_REPOSITORY, found $origin" >&2
+    exit 2
+  fi
+  if [[ -n $(git -C "$OGBENCH_ROOT" status --porcelain --untracked-files=no) ]]; then
+    echo "Official OGBench checkout has tracked modifications" >&2
+    exit 2
+  fi
+  echo "OGBENCH_READY commit=$actual origin=$origin root=$OGBENCH_ROOT"
+}
+
 require_python() {
   if [[ ! -x "$PYTHON_BIN" ]]; then
     echo "Read-only OGBench JAX environment not found: $PYTHON_BIN" >&2
     exit 2
   fi
-  if [[ ! -f "$LDP_RUNTIME_ROOT/.ldp_env_spec_sha256" ]]; then
+  local marker="$LDP_RUNTIME_ROOT/.ldp_env_spec_sha256"
+  if [[ ! -f "$marker" ]]; then
     echo "LDP dependency overlay is not initialized. Run MODE=setup-env first." >&2
     exit 2
+  fi
+  local expected actual
+  expected=$(python3 -c 'import hashlib,json,sys; print(hashlib.sha256(json.dumps(json.load(open(sys.argv[1])),sort_keys=True,separators=(",",":")).encode()).hexdigest())' "$ENV_SPEC")
+  actual=$(<"$marker")
+  if [[ "$actual" != "$expected" ]]; then
+    echo "LDP dependency overlay spec mismatch: expected $expected, found $actual" >&2
+    exit 4
   fi
 }
 
@@ -134,6 +174,7 @@ prepare_egl_runtime() {
 
 setup_env() {
   check_upstream
+  setup_ogbench
   if [[ ! -f "$ENV_SPEC" ]]; then
     echo "Missing environment spec: $ENV_SPEC" >&2
     exit 2
@@ -285,11 +326,30 @@ run_eval() {
   mkdir -p "$(dirname "$EVAL_DIR")"
   cd "$STABLEWM_ROOT"
   export CUDA_VISIBLE_DEVICES="$GPU_ID"
+  local horizon_args=()
+  if [[ -n "$MAX_EPISODE_STEPS" ]]; then
+    horizon_args=(--max-episode-steps "$MAX_EPISODE_STEPS")
+  fi
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py eval \
     --run-dir "$LDP_DIR" --vae-dir "$VAE_DIR" --output-dir "$EVAL_DIR" \
-    --env-id "$ENV_ID" --episodes "$EPISODES" --seed "$EVAL_SEED" \
-    --max-episode-steps "$MAX_EPISODE_STEPS" \
-    --reward-task-id "$REWARD_TASK_ID"
+    --dataset-id "$DATASET_ID" --env-id "$ENV_ID" \
+    --episodes "$EPISODES" --seed "$EVAL_SEED" \
+    --task-ids $EVAL_TASK_IDS "${horizon_args[@]}"
+}
+
+audit_environment() {
+  require_python
+  check_upstream
+  prepare_egl_runtime
+  cd "$STABLEWM_ROOT"
+  export CUDA_VISIBLE_DEVICES="$GPU_ID"
+  local horizon_args=()
+  if [[ -n "$MAX_EPISODE_STEPS" ]]; then
+    horizon_args=(--max-episode-steps "$MAX_EPISODE_STEPS")
+  fi
+  "$PYTHON_BIN" scripts/train/ldp_ogbench.py audit-environment \
+    --dataset-id "$DATASET_ID" --env-id "$ENV_ID" --seed "$EVAL_SEED" \
+    "${horizon_args[@]}"
 }
 
 pipeline() {
@@ -311,9 +371,9 @@ smoke() {
   VAE_DIR="$smoke_root/vae" LATENT_FILE="$smoke_root/latents.h5" \
     LDP_DIR="$smoke_root/ldp" EVAL_DIR="$smoke_root/eval" \
     VAE_STEPS=2 VAE_BATCH_SIZE=2 VAE_LOG_EVERY=1 VAE_SAVE_EVERY=2 \
-    ENCODE_BATCH_SIZE=64 MAX_ENCODE_EPISODES=2 MAX_VAE_VALIDATION_MSE=1.0 \
+    ENCODE_BATCH_SIZE=64 MAX_ENCODE_EPISODES=40 MAX_VAE_VALIDATION_MSE=1.0 \
     LDP_STEPS=2 LDP_BATCH_SIZE=2 LDP_LOG_EVERY=1 LDP_SAVE_EVERY=2 \
-    EPISODES=1 MAX_EPISODE_STEPS=1 pipeline_smoke
+    EPISODES=1 EVAL_TASK_IDS='1 2 3 4 5' MAX_EPISODE_STEPS=1 pipeline_smoke
   echo "SMOKE_COMPLETE=$smoke_root"
 }
 
@@ -340,7 +400,7 @@ launch() {
     exit 4
   fi
   tmux new-session -d -s "$session" \
-    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' DATASET_ROOT='$DATASET_ROOT' DATASET_ID='$DATASET_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' TASK_TAG='$TASK_TAG' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' VAE_LOG_EVERY='$VAE_LOG_EVERY' VAE_SAVE_EVERY='$VAE_SAVE_EVERY' ENCODE_BATCH_SIZE='$ENCODE_BATCH_SIZE' VAE_VALIDATION_SAMPLES='$VAE_VALIDATION_SAMPLES' MAX_VAE_VALIDATION_MSE='$MAX_VAE_VALIDATION_MSE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' LDP_LOG_EVERY='$LDP_LOG_EVERY' LDP_SAVE_EVERY='$LDP_SAVE_EVERY' LDP_VALIDATION_BATCHES='$LDP_VALIDATION_BATCHES' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' ENV_ID='$ENV_ID' REWARD_TASK_ID='$REWARD_TASK_ID' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' RESUME='$RESUME' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
+    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' DATASET_ROOT='$DATASET_ROOT' DATASET_ID='$DATASET_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' TASK_TAG='$TASK_TAG' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' VAE_LOG_EVERY='$VAE_LOG_EVERY' VAE_SAVE_EVERY='$VAE_SAVE_EVERY' ENCODE_BATCH_SIZE='$ENCODE_BATCH_SIZE' VAE_VALIDATION_SAMPLES='$VAE_VALIDATION_SAMPLES' MAX_VAE_VALIDATION_MSE='$MAX_VAE_VALIDATION_MSE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' LDP_LOG_EVERY='$LDP_LOG_EVERY' LDP_SAVE_EVERY='$LDP_SAVE_EVERY' LDP_VALIDATION_BATCHES='$LDP_VALIDATION_BATCHES' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' ENV_ID='$ENV_ID' EVAL_TASK_IDS='$EVAL_TASK_IDS' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' RESUME='$RESUME' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
   echo "LAUNCHED session=$session gpu=$GPU_ID log=$ARTIFACT_ROOT/${RUN_NAME}.log"
 }
 
@@ -357,6 +417,7 @@ status() {
 }
 
 case "$MODE" in
+  setup-ogbench) setup_ogbench ;;
   setup-env) setup_env ;;
   env-witness) env_witness ;;
   test) unit_test ;;
@@ -364,6 +425,7 @@ case "$MODE" in
   train-vae) train_vae ;;
   encode) encode_data ;;
   train-ldp) train_ldp ;;
+  audit-environment) audit_environment ;;
   eval) run_eval ;;
   pipeline) pipeline ;;
   smoke) smoke ;;

@@ -1,0 +1,41 @@
+{
+  "acceptance_status": "provisional",
+  "audit_snapshot": "2026-09-08T08:36:00+08:00",
+  "evaluation_type": "simulation_only",
+  "formal_results_complete": false,
+  "review_independence": "same-family",
+  "sections": {
+    "A_ground_truth_provenance": "PASS",
+    "B_score_normalization": "PASS",
+    "C_result_existence": "WARN",
+    "D_executed_path": "WARN",
+    "E_scope": "WARN",
+    "F_evaluation_type": "PASS"
+  },
+  "scope": {
+    "dataset_configurations": 8,
+    "dataset_types": [
+      "play",
+      "noisy"
+    ],
+    "environments": [
+      "visual-cube-single-v0",
+      "visual-cube-double-v0",
+      "visual-cube-triple-v0",
+      "visual-scene-v0"
+    ],
+    "episodes_per_evaluation_task": 10,
+    "evaluation_tasks_per_dataset": 5,
+    "formal_episodes_per_dataset": 50,
+    "training_seeds": [
+      1
+    ]
+  },
+  "verdict": "WARN",
+  "warnings": [
+    "All eight formal runs were incomplete at the audit snapshot.",
+    "Prior smoke evaluation used fixed task 2 and a custom 50-step horizon.",
+    "Seven matrix smokes plus one older standalone cube-single smoke existed.",
+    "No multi-seed robustness claim is supported."
+  ]
+}

@@ -12,11 +12,12 @@ TASK_SCRIPT="$SCRIPT_DIR/20260908_yb_ldp_ogbench_cube.sh"
 
 MODE=${MODE:-status}
 TASK_INDEX=${TASK_INDEX:-}
+PYTHON_BIN=${PYTHON_BIN:-/root/data/yyf/ogbench-new/.venv/bin/python}
 DATASET_ROOT=${DATASET_ROOT:-/root/data/yyf/stablewm-data/datasets/ogbench8-tdmpc2-pixels-gc-h50}
 ARTIFACT_ROOT=${ARTIFACT_ROOT:-/root/data/yyf/ldp-ogbench}
-LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-/root/data/yyf/ldp-ogbench/runtime}
+LDP_RUNTIME_ROOT=${LDP_RUNTIME_ROOT:-/root/data/yyf/ldp-ogbench/runtime-v2}
 LDP_OVERLAY=${LDP_OVERLAY:-$LDP_RUNTIME_ROOT/site-packages}
-OGBENCH_ROOT=${OGBENCH_ROOT:-/root/data/yyf/ogbench-eval-main-20260830}
+OGBENCH_ROOT=${OGBENCH_ROOT:-/root/data/yyf/ogbench-official-1d414099}
 CORE_LABEL=${CORE_LABEL:-gc_finalgoal_h8_a4_ds100_v300k_p500k_b128}
 SEED=${SEED:-1}
 VAE_STEPS=${VAE_STEPS:-300000}
@@ -36,10 +37,11 @@ ACTION_HORIZON=${ACTION_HORIZON:-4}
 DIFFUSION_STEPS=${DIFFUSION_STEPS:-100}
 EPISODES=${EPISODES:-10}
 EVAL_SEED=${EVAL_SEED:-42}
-MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-50}
-REWARD_TASK_ID=${REWARD_TASK_ID:-2}
+EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
+MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 MIN_FREE_MEMORY_MIB=${MIN_FREE_MEMORY_MIB:-17000}
 XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.18}
+COMPLETION_AUDIT_OUTPUT=${COMPLETION_AUDIT_OUTPUT:-$ARTIFACT_ROOT/audits/ldp_ogbench8_completion.json}
 
 dataset_ids=(
   visual-cube-single-play-v0
@@ -103,7 +105,7 @@ run_base() {
   MIN_FREE_MEMORY_MIB="$MIN_FREE_MEMORY_MIB" \
   XLA_PYTHON_CLIENT_MEM_FRACTION="$XLA_PYTHON_CLIENT_MEM_FRACTION" \
   ENV_ID="${env_ids[$index]}" \
-  REWARD_TASK_ID="$REWARD_TASK_ID" \
+  EVAL_TASK_IDS="$EVAL_TASK_IDS" \
   SEED="$SEED" \
   VAE_STEPS="$VAE_STEPS" VAE_BATCH_SIZE="$VAE_BATCH_SIZE" \
   VAE_LOG_EVERY="$VAE_LOG_EVERY" VAE_SAVE_EVERY="$VAE_SAVE_EVERY" \
@@ -136,6 +138,15 @@ audit_all() {
     run_base "$index" audit-data
   done
   echo "AUDIT_MATRIX_COMPLETE=8"
+}
+
+audit_environments() {
+  local index
+  for index in "${!dataset_ids[@]}"; do
+    echo "ENV_AUDIT index=$index dataset=${dataset_ids[$index]}"
+    run_base "$index" audit-environment
+  done
+  echo "ENV_AUDIT_MATRIX_COMPLETE=8"
 }
 
 smoke_one() {
@@ -182,9 +193,52 @@ launch_missing() {
   done
 }
 
+eval_one() {
+  : "${TASK_INDEX:?TASK_INDEX is required for MODE=eval-one}"
+  run_base "$TASK_INDEX" eval
+}
+
+launch_eval_ready() {
+  local index name formal_session eval_session formal_log eval_log ldp eval
+  for index in "${!dataset_ids[@]}"; do
+    name=$(run_name "$index")
+    formal_session="ldp_${name:0:70}"
+    eval_session="ldp_eval_${name:0:65}"
+    formal_log="$ARTIFACT_ROOT/$name.log"
+    eval_log="$ARTIFACT_ROOT/${name}_official_eval.log"
+    ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
+    eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
+    if [[ -s "$eval" ]]; then
+      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert len(r["tasks"])==5' \
+        "$eval" "${dataset_ids[$index]}" "$EPISODES" 2>/dev/null; then
+        echo "EVAL_ALREADY_COMPLETE index=$index result=$eval"
+      else
+        echo "EVAL_INVALID_REQUIRES_INSPECTION index=$index result=$eval" >&2
+      fi
+      continue
+    fi
+    if tmux has-session -t "$formal_session" 2>/dev/null; then
+      echo "EVAL_WAIT_FORMAL index=$index session=$formal_session"
+      continue
+    fi
+    if tmux has-session -t "$eval_session" 2>/dev/null; then
+      echo "EVAL_ALREADY_RUNNING index=$index session=$eval_session"
+      continue
+    fi
+    if [[ ! -s "$ldp" ]] || [[ ! -f "$formal_log" ]] \
+      || ! grep -q 'LDP_COMPLETE=' "$formal_log"; then
+      echo "EVAL_NOT_READY index=$index"
+      continue
+    fi
+    tmux new-session -d -s "$eval_session" \
+      "cd '$STABLEWM_ROOT' && MODE=eval-one TASK_INDEX='$index' DATASET_ROOT='$DATASET_ROOT' ARTIFACT_ROOT='$ARTIFACT_ROOT' CORE_LABEL='$CORE_LABEL' SEED='$SEED' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' EVAL_TASK_IDS='$EVAL_TASK_IDS' LDP_RUNTIME_ROOT='$LDP_RUNTIME_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' XLA_PYTHON_CLIENT_MEM_FRACTION='$XLA_PYTHON_CLIENT_MEM_FRACTION' bash '$0' 2>&1 | tee '$eval_log'"
+    echo "EVAL_LAUNCHED index=$index gpu=${gpu_ids[$index]} session=$eval_session log=$eval_log"
+  done
+}
+
 status() {
-  local index name session log vae latent ldp eval
-  local phase session_state vae_step ldp_step anomalies
+  local index name session eval_session log eval_log vae latent ldp eval
+  local phase session_state eval_session_state vae_step ldp_step anomalies eval_state
   date -Iseconds
   nvidia-smi --query-gpu=index,memory.used,memory.free,memory.total,utilization.gpu \
     --format=csv,noheader,nounits
@@ -194,7 +248,9 @@ status() {
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     session="ldp_${name:0:70}"
+    eval_session="ldp_eval_${name:0:65}"
     log="$ARTIFACT_ROOT/$name.log"
+    eval_log="$ARTIFACT_ROOT/${name}_official_eval.log"
     vae="$ARTIFACT_ROOT/runs/${name}_vae/checkpoint.msgpack"
     latent="$ARTIFACT_ROOT/data/${name}_latents.h5"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
@@ -212,7 +268,8 @@ status() {
       vae_step=${vae_step:-0}
       ldp_step=${ldp_step:-0}
       anomalies=$(grep -Ec \
-        'Traceback|CUDA out of memory|NaN|nan|Fatal|ERROR' "$log" || true)
+        'Traceback \(most recent call last\):|CUDA out of memory|(^|[^[:alpha:]])(NaN|nan)([^[:alpha:]]|$)|(^|[^[:alpha:]])FATAL([^[:alpha:]]|$)|(^|[^[:alpha:]])ERROR([^[:alpha:]]|$)' \
+        "$log" || true)
       if grep -q 'VAE_METRICS=' "$log"; then
         phase=vae
       fi
@@ -226,35 +283,72 @@ status() {
         phase=eval
       fi
     fi
+    if [[ -f "$eval_log" ]]; then
+      anomalies=$((anomalies + $(grep -Ec \
+        'Traceback \(most recent call last\):|CUDA out of memory|(^|[^[:alpha:]])(NaN|nan)([^[:alpha:]]|$)|(^|[^[:alpha:]])FATAL([^[:alpha:]]|$)|(^|[^[:alpha:]])ERROR([^[:alpha:]]|$)' \
+        "$eval_log" || true)))
+    fi
+    eval_state=no
     if [[ -s "$eval" ]]; then
-      phase=complete
+      if "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert len(r["tasks"])==5' \
+        "$eval" "${dataset_ids[$index]}" "$EPISODES" 2>/dev/null; then
+        phase=complete
+        eval_state=valid
+      else
+        phase=invalid_eval
+        eval_state=invalid
+      fi
     fi
     if tmux has-session -t "$session" 2>/dev/null; then
       session_state=live
     else
       session_state=missing
     fi
+    if tmux has-session -t "$eval_session" 2>/dev/null; then
+      eval_session_state=live
+    else
+      eval_session_state=missing
+    fi
 
-    printf 'STATUS index=%s gpu=%s dataset=%s run=%s session=%s phase=%s vae_step=%s vae_ckpt=%s latent=%s ldp_step=%s ldp_ckpt=%s eval=%s anomalies=%s\n' \
+    printf 'STATUS index=%s gpu=%s dataset=%s run=%s session=%s eval_session=%s phase=%s vae_step=%s vae_ckpt=%s latent=%s ldp_step=%s ldp_ckpt=%s eval=%s anomalies=%s\n' \
       "$index" "${gpu_ids[$index]}" "${dataset_ids[$index]}" "$name" \
-      "$session_state" \
+      "$session_state" "$eval_session_state" \
       "$phase" "$vae_step" \
       "$([[ -s "$vae" ]] && echo yes || echo no)" \
       "$([[ -s "$latent" ]] && echo yes || echo no)" \
       "$ldp_step" \
       "$([[ -s "$ldp" ]] && echo yes || echo no)" \
-      "$([[ -s "$eval" ]] && echo yes || echo no)" "$anomalies"
+      "$eval_state" "$anomalies"
   done
+}
+
+audit_completion() {
+  if [[ ! -x "$PYTHON_BIN" ]]; then
+    echo "Python environment not found: $PYTHON_BIN" >&2
+    exit 2
+  fi
+  cd "$STABLEWM_ROOT"
+  PYTHONPATH="$LDP_OVERLAY:$STABLEWM_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" scripts/audit_ldp_ogbench8.py \
+      --dataset-root "$DATASET_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --label "$CORE_LABEL" \
+      --seed "$SEED" --episodes "$EPISODES" --eval-seed "$EVAL_SEED" \
+      --output "$COMPLETION_AUDIT_OUTPUT"
 }
 
 case "$MODE" in
   plan) plan ;;
   audit) audit_all ;;
+  audit-environments) audit_environments ;;
   smoke-one) smoke_one ;;
   smoke-missing) smoke_missing ;;
   launch-one) launch_one ;;
   launch-missing) launch_missing ;;
+  eval-one) eval_one ;;
+  launch-eval-ready) launch_eval_ready ;;
   status) status ;;
+  audit-completion) audit_completion ;;
   *)
     echo "Unknown MODE=$MODE" >&2
     exit 2

@@ -31,6 +31,7 @@ from scripts.data.ldp_ogbench_data import OGBenchLDPData, h5_take
 
 
 UPSTREAM_COMMIT = 'a26cbf1d2c0aec7adc5d9746f47831b162a41c0c'
+OGBENCH_COMMIT = '1d4140997f60c52c6fb0702ec100dc988b18c548'
 VAE_ARCH = {
     'act_fn': 'silu',
     'block_out_channels': [64, 128, 256, 256, 256],
@@ -74,9 +75,54 @@ def verify_upstream() -> str:
 
 
 def adapter_commit() -> str:
-    return subprocess.check_output(
+    commit = subprocess.check_output(
         ['git', '-C', str(repo_root()), 'rev-parse', 'HEAD'], text=True
     ).strip()
+    upstream_main = subprocess.check_output(
+        ['git', '-C', str(repo_root()), 'rev-parse', 'origin/main'], text=True
+    ).strip()
+    if commit != upstream_main:
+        raise RuntimeError(
+            f'Adapter checkout must match origin/main: HEAD={commit}, '
+            f'origin/main={upstream_main}'
+        )
+    dirty = subprocess.check_output(
+        ['git', '-C', str(repo_root()), 'status', '--porcelain'], text=True
+    ).strip()
+    if dirty:
+        raise RuntimeError(
+            'Adapter checkout must be clean so the recorded commit fully '
+            'identifies the executed code'
+        )
+    return commit
+
+
+def verify_ogbench() -> dict[str, str]:
+    root_value = os.environ.get('OGBENCH_ROOT')
+    if not root_value:
+        raise RuntimeError('OGBENCH_ROOT is required for reproducible evaluation')
+    root = Path(root_value).expanduser().resolve()
+    if not (root / 'ogbench' / 'utils.py').is_file():
+        raise RuntimeError(f'Official OGBench checkout is missing: {root}')
+    commit = subprocess.check_output(
+        ['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True
+    ).strip()
+    if commit != OGBENCH_COMMIT:
+        raise RuntimeError(
+            f'Expected official OGBench {OGBENCH_COMMIT}, found {commit}'
+        )
+    dirty = subprocess.check_output(
+        ['git', '-C', str(root), 'status', '--porcelain', '--untracked-files=no'],
+        text=True,
+    ).strip()
+    if dirty:
+        raise RuntimeError('Official OGBench checkout has tracked modifications')
+    remote = subprocess.check_output(
+        ['git', '-C', str(root), 'remote', 'get-url', 'origin'], text=True
+    ).strip()
+    if remote.rstrip('/').removesuffix('.git') != 'https://github.com/seohongpark/ogbench':
+        raise RuntimeError(f'Unexpected OGBench origin: {remote}')
+    return {'commit': commit, 'origin': remote, 'root': str(root)}
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -334,6 +380,7 @@ def encode(args: argparse.Namespace) -> None:
     import jax.numpy as jnp
 
     verify_upstream()
+    encoding_adapter_commit = adapter_commit()
     data = OGBenchLDPData(args.source)
     vae, params, vae_config = load_vae_run(args.vae_dir)
     output = args.output.expanduser().resolve()
@@ -344,6 +391,11 @@ def encode(args: argparse.Namespace) -> None:
     if args.max_episodes is not None:
         episodes = min(episodes, args.max_episodes)
     rows = int(data.offsets[episodes - 1] + data.lengths[episodes - 1])
+    normalization_episodes = data.training_episode_count(episodes)
+    normalization_rows = int(
+        data.offsets[normalization_episodes - 1]
+        + data.lengths[normalization_episodes - 1]
+    )
 
     @jax.jit
     def encode_images(images):
@@ -417,8 +469,11 @@ def encode(args: argparse.Namespace) -> None:
                 if flat.shape[1] != 64:
                     raise RuntimeError(f'Expected 64-D latent, got {flat.shape}')
                 latent_ds[start:end] = flat.astype(np.float16)
-                latent_min = min(latent_min, float(flat.min()))
-                latent_max = max(latent_max, float(flat.max()))
+                normalization_count = max(0, min(end, normalization_rows) - start)
+                if normalization_count:
+                    normalization_values = flat[:normalization_count]
+                    latent_min = min(latent_min, float(normalization_values.min()))
+                    latent_max = max(latent_max, float(normalization_values.max()))
                 if start == 0 or end == rows or end % (args.batch_size * 100) == 0:
                     print(f'ENCODE_PROGRESS={end}/{rows}', flush=True)
             destination.attrs['source'] = str(data.source_path)
@@ -428,12 +483,15 @@ def encode(args: argparse.Namespace) -> None:
             destination.attrs['episodes'] = episodes
             destination.attrs['latent_min'] = latent_min
             destination.attrs['latent_max'] = latent_max
+            destination.attrs['normalization_split'] = 'train_episodes_only'
+            destination.attrs['normalization_episodes'] = normalization_episodes
+            destination.attrs['normalization_rows'] = normalization_rows
             destination.attrs['vae_validation_mse'] = validation_mse
             destination.attrs['vae_validation_psnr_db'] = validation_psnr
             destination.attrs['vae_dir'] = str(args.vae_dir.expanduser().resolve())
             destination.attrs['vae_source_size_bytes'] = vae_config['source_size_bytes']
             destination.attrs['upstream_commit'] = UPSTREAM_COMMIT
-            destination.attrs['adapter_commit'] = adapter_commit()
+            destination.attrs['adapter_commit'] = encoding_adapter_commit
         temporary.replace(output)
         write_json(output.with_suffix('.vae_validation.json'), validation)
     finally:
@@ -936,29 +994,125 @@ def make_sampler(config: dict[str, Any], params: Any):
 
 
 def task_goal_residual(env) -> float:
-    """Return the official task residual for any supported OGBench scene.
+    """Count unsatisfied goal components as a diagnostic residual.
 
-    The cube environments expose between one and three objects, while the scene
-    environment additionally contains buttons, a drawer, and a window.  A
-    distance to ``object_joint_0`` therefore is neither complete for multi-cube
-    tasks nor meaningful for scene tasks.  OGBench's task reward already counts
-    all required goal components and is zero exactly when they are all
-    satisfied.  Negating it gives a task-generic, non-negative residual.
+    Official goal-conditioned OGBench environments expose a binary 0/1 reward,
+    so ``-compute_reward()`` is not a useful residual.  Manipulation
+    environments also expose their component-wise success predicate.  We count
+    the false leaves of that predicate for diagnostics only; official reporting
+    is always based on the environment's ``success`` flag.
     """
-    reward = float(env.unwrapped.compute_reward())
-    if not np.isfinite(reward):
-        raise RuntimeError(f'Non-finite OGBench task reward: {reward}')
-    return max(0.0, -reward)
+
+    def boolean_leaves(value):
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                yield from boolean_leaves(item)
+        else:
+            yield bool(value)
+
+    unwrapped = env.unwrapped
+    if not hasattr(unwrapped, '_compute_successes'):
+        raise RuntimeError('OGBench environment has no component success predicate')
+    leaves = list(boolean_leaves(unwrapped._compute_successes()))
+    if not leaves:
+        raise RuntimeError('OGBench component success predicate is empty')
+    return float(sum(not item for item in leaves))
+
+
+def make_official_eval_env(
+    ogbench_module, dataset_id: str, env_id: str, max_episode_steps: int | None
+):
+    env_kwargs: dict[str, Any] = {
+        'render_mode': 'rgb_array',
+        'height': 64,
+        'width': 64,
+        'visualize_info': False,
+    }
+    if max_episode_steps is not None:
+        env_kwargs['max_episode_steps'] = max_episode_steps
+    env = ogbench_module.make_env_and_datasets(
+        dataset_id,
+        env_only=True,
+        **env_kwargs,
+    )
+    if env.spec is None or env.spec.max_episode_steps is None:
+        env.close()
+        raise RuntimeError('OGBench environment has no registered episode horizon')
+    if env.spec.id != env_id:
+        actual = env.spec.id
+        env.close()
+        raise RuntimeError(
+            f'Dataset {dataset_id} produced {actual}, expected {env_id}'
+        )
+    if len(env.unwrapped.task_infos) != 5:
+        count = len(env.unwrapped.task_infos)
+        env.close()
+        raise RuntimeError(f'Expected five official tasks, found {count}')
+    return env
+
+
+def audit_environment(args: argparse.Namespace) -> None:
+    os.environ.setdefault('MUJOCO_GL', 'egl')
+    verify_upstream()
+    commit = adapter_commit()
+    ogbench_provenance = verify_ogbench()
+    import ogbench
+
+    env = make_official_eval_env(
+        ogbench, args.dataset_id, args.env_id, args.max_episode_steps
+    )
+    actual_horizon = int(env.spec.max_episode_steps)
+    tasks = []
+    try:
+        for task_id in range(1, 6):
+            observation, info = env.reset(
+                seed=args.seed + task_id * 1_000_000,
+                options={'task_id': task_id, 'render_goal': False},
+            )
+            goal = info.get('goal')
+            if goal is None:
+                raise RuntimeError(f'Task {task_id} reset did not return a goal')
+            initial_residual = task_goal_residual(env)
+            action = np.zeros(env.action_space.shape, dtype=env.action_space.dtype)
+            _, reward, terminated, truncated, step_info = env.step(action)
+            tasks.append(
+                {
+                    'task_id': task_id,
+                    'task_name': env.unwrapped.task_infos[task_id - 1]['task_name'],
+                    'observation_shape': list(np.asarray(observation).shape),
+                    'goal_shape': list(np.asarray(goal).shape),
+                    'initial_unsatisfied_components': initial_residual,
+                    'step_reward': float(reward),
+                    'step_success': bool(step_info.get('success', False)),
+                    'step_terminated': bool(terminated),
+                    'step_truncated': bool(truncated),
+                }
+            )
+    finally:
+        env.close()
+    result = {
+        'adapter_commit': commit,
+        'ogbench': ogbench_provenance,
+        'dataset_id': args.dataset_id,
+        'environment': {
+            'id': args.env_id,
+            'max_episode_steps': actual_horizon,
+            'uses_registered_horizon': args.max_episode_steps is None,
+        },
+        'tasks': tasks,
+    }
+    print('ENV_AUDIT_JSON=' + json.dumps(result, sort_keys=True), flush=True)
 
 
 def evaluate(args: argparse.Namespace) -> None:
     os.environ.setdefault('MUJOCO_GL', 'egl')
-    import gymnasium as gym
     import jax
     import jax.numpy as jnp
-    import ogbench  # noqa: F401  # registers official environments
 
     verify_upstream()
+    evaluation_adapter_commit = adapter_commit()
+    ogbench_provenance = verify_ogbench()
+    import ogbench
     run_dir = args.run_dir.expanduser().resolve()
     config = json.loads((run_dir / 'config.json').read_text())
     if config['upstream_commit'] != UPSTREAM_COMMIT:
@@ -984,79 +1138,113 @@ def evaluate(args: argparse.Namespace) -> None:
             1,
         )
 
-    output = create_output_dir(args.output_dir)
-    env = gym.make(
-        args.env_id,
-        max_episode_steps=args.max_episode_steps,
-        render_mode='rgb_array',
-        height=64,
-        width=64,
-        reward_task_id=args.reward_task_id,
-        terminate_at_goal=True,
-        visualize_info=False,
-        permute_blocks=False,
+    env = make_official_eval_env(
+        ogbench, args.dataset_id, args.env_id, args.max_episode_steps
     )
-    successes: list[bool] = []
-    returns: list[float] = []
-    lengths: list[int] = []
-    initial_residuals: list[float] = []
-    final_residuals: list[float] = []
-    minimum_residuals: list[float] = []
-    action_norms: list[float] = []
+    actual_env_id = env.spec.id
+    actual_horizon = int(env.spec.max_episode_steps)
+    task_infos = env.unwrapped.task_infos
+    if len(set(args.task_ids)) != len(args.task_ids):
+        env.close()
+        raise ValueError(f'Duplicate task IDs: {args.task_ids}')
+    if any(task_id < 1 or task_id > len(task_infos) for task_id in args.task_ids):
+        env.close()
+        raise ValueError(f'Task IDs must be in [1, {len(task_infos)}]: {args.task_ids}')
+
+    output = create_output_dir(args.output_dir)
+    task_results: list[dict[str, Any]] = []
+    all_successes: list[bool] = []
     key = jax.random.PRNGKey(args.seed)
     started = time.time()
     try:
-        for episode in range(args.episodes):
-            observation, info = env.reset(seed=args.seed + episode)
-            goal = info.get('goal', info.get('target'))
-            if goal is None:
-                raise RuntimeError('OGBench reset info has neither goal nor target')
-            observation = np.asarray(observation)
-            goal = np.asarray(goal)
-            if observation.shape != (64, 64, 3) or goal.shape != (64, 64, 3):
-                raise RuntimeError(
-                    f'Expected 64x64 RGB current/goal, got {observation.shape}/{goal.shape}'
+        for task_id in args.task_ids:
+            successes: list[bool] = []
+            returns: list[float] = []
+            lengths: list[int] = []
+            initial_residuals: list[float] = []
+            final_residuals: list[float] = []
+            minimum_residuals: list[float] = []
+            action_norms: list[float] = []
+            for episode in range(args.episodes):
+                episode_seed = args.seed + task_id * 1_000_000 + episode
+                observation, info = env.reset(
+                    seed=episode_seed,
+                    options={'task_id': task_id, 'render_goal': False},
                 )
-            goal_latent = encode_pixels(jnp.asarray(goal[None]))
-            initial_residual = task_goal_residual(env)
-            minimum_residual = initial_residual
-            episode_return = 0.0
-            episode_action_norms: list[float] = []
-            success = bool(info.get('success', False))
-            length = 0
-            queued_actions = np.zeros((0, config['action_dim']), dtype=np.float32)
-            for step in range(args.max_episode_steps):
-                if len(queued_actions) == 0:
-                    current_latent = encode_pixels(jnp.asarray(observation[None]))
-                    key, sample_key = jax.random.split(key)
-                    queued_actions = np.asarray(
-                        sampler(current_latent, goal_latent, sample_key)[0]
+                goal = info.get('goal')
+                if goal is None:
+                    raise RuntimeError('OGBench reset info has no goal')
+                observation = np.asarray(observation)
+                goal = np.asarray(goal)
+                if observation.shape != (64, 64, 3) or goal.shape != (64, 64, 3):
+                    raise RuntimeError(
+                        f'Expected 64x64 RGB current/goal, got '
+                        f'{observation.shape}/{goal.shape}'
                     )
-                action, queued_actions = queued_actions[0], queued_actions[1:]
-                episode_action_norms.append(float(np.linalg.norm(action)))
-                observation, reward, terminated, truncated, info = env.step(action)
-                residual = task_goal_residual(env)
-                minimum_residual = min(minimum_residual, residual)
-                episode_return += float(reward)
-                success = success or bool(info.get('success', False))
-                length = step + 1
-                if terminated or truncated:
-                    break
-            final_residual = task_goal_residual(env)
-            successes.append(success)
-            returns.append(episode_return)
-            lengths.append(length)
-            initial_residuals.append(initial_residual)
-            final_residuals.append(final_residual)
-            minimum_residuals.append(minimum_residual)
-            action_norms.append(float(np.mean(episode_action_norms)))
+                goal_latent = encode_pixels(jnp.asarray(goal[None]))
+                initial_residual = task_goal_residual(env)
+                minimum_residual = initial_residual
+                episode_return = 0.0
+                episode_action_norms: list[float] = []
+                success = bool(info.get('success', False))
+                length = 0
+                queued_actions = np.zeros(
+                    (0, config['action_dim']), dtype=np.float32
+                )
+                for step in range(actual_horizon):
+                    if len(queued_actions) == 0:
+                        current_latent = encode_pixels(jnp.asarray(observation[None]))
+                        key, sample_key = jax.random.split(key)
+                        queued_actions = np.asarray(
+                            sampler(current_latent, goal_latent, sample_key)[0]
+                        )
+                    action, queued_actions = queued_actions[0], queued_actions[1:]
+                    episode_action_norms.append(float(np.linalg.norm(action)))
+                    observation, reward, terminated, truncated, info = env.step(action)
+                    residual = task_goal_residual(env)
+                    minimum_residual = min(minimum_residual, residual)
+                    episode_return += float(reward)
+                    success = success or bool(info.get('success', False))
+                    length = step + 1
+                    if terminated or truncated:
+                        break
+                final_residual = task_goal_residual(env)
+                successes.append(success)
+                returns.append(episode_return)
+                lengths.append(length)
+                initial_residuals.append(initial_residual)
+                final_residuals.append(final_residual)
+                minimum_residuals.append(minimum_residual)
+                action_norms.append(float(np.mean(episode_action_norms)))
+                all_successes.append(success)
+                print(
+                    f'EPISODE task_id={task_id} episode={episode + 1} '
+                    f'success={int(success)} return={episode_return:.6f} '
+                    f'length={length} initial_goal_residual={initial_residual:.6f} '
+                    f'final_goal_residual={final_residual:.6f} '
+                    f'min_goal_residual={minimum_residual:.6f} '
+                    f'mean_action_norm={action_norms[-1]:.6f}',
+                    flush=True,
+                )
+            task_results.append(
+                {
+                    'task_id': task_id,
+                    'task_name': task_infos[task_id - 1]['task_name'],
+                    'episodes': args.episodes,
+                    'success_rate': float(np.mean(successes)),
+                    'episode_successes': successes,
+                    'episode_returns': returns,
+                    'episode_lengths': lengths,
+                    'initial_goal_residuals': initial_residuals,
+                    'final_goal_residuals': final_residuals,
+                    'minimum_goal_residuals': minimum_residuals,
+                    'mean_action_norms': action_norms,
+                }
+            )
             print(
-                f'EPISODE episode={episode + 1} success={int(success)} '
-                f'return={episode_return:.6f} length={length} '
-                f'initial_goal_residual={initial_residual:.6f} '
-                f'final_goal_residual={final_residual:.6f} '
-                f'min_goal_residual={minimum_residual:.6f} '
-                f'mean_action_norm={action_norms[-1]:.6f}',
+                f'TASK_RESULT task_id={task_id} '
+                f'task_name={task_infos[task_id - 1]["task_name"]} '
+                f'success_rate={task_results[-1]["success_rate"]:.6f}',
                 flush=True,
             )
     finally:
@@ -1065,23 +1253,22 @@ def evaluate(args: argparse.Namespace) -> None:
         'method': 'goal_conditioned_latent_diffusion_planning',
         'upstream_commit': UPSTREAM_COMMIT,
         'training_adapter_commit': config.get('adapter_commit'),
-        'evaluation_adapter_commit': adapter_commit(),
+        'evaluation_adapter_commit': evaluation_adapter_commit,
+        'ogbench': ogbench_provenance,
         'checkpoint': str(run_dir / 'checkpoint.msgpack'),
-        'episodes': args.episodes,
+        'dataset_id': args.dataset_id,
+        'episodes_per_task': args.episodes,
+        'task_ids': args.task_ids,
+        'total_episodes': len(args.task_ids) * args.episodes,
         'seed': args.seed,
-        'success_rate': float(np.mean(successes)),
-        'episode_successes': successes,
-        'episode_returns': returns,
-        'episode_lengths': lengths,
-        'initial_goal_residuals': initial_residuals,
-        'final_goal_residuals': final_residuals,
-        'minimum_goal_residuals': minimum_residuals,
-        'mean_action_norms': action_norms,
+        'success_rate': float(np.mean(all_successes)),
+        'tasks': task_results,
         'elapsed_seconds': time.time() - started,
         'environment': {
-            'id': args.env_id,
-            'reward_task_id': args.reward_task_id,
-            'max_episode_steps': args.max_episode_steps,
+            'id': actual_env_id,
+            'creation_api': 'ogbench.make_env_and_datasets(env_only=True)',
+            'max_episode_steps': actual_horizon,
+            'uses_registered_horizon': args.max_episode_steps is None,
         },
         'planner': {
             'pred_horizon': config['pred_horizon'],
@@ -1101,6 +1288,13 @@ def parser() -> argparse.ArgumentParser:
     audit_parser.add_argument('--source', type=Path, required=True)
     audit_parser.add_argument('--latents', type=Path)
     audit_parser.set_defaults(func=audit)
+
+    env_parser = commands.add_parser('audit-environment')
+    env_parser.add_argument('--dataset-id', required=True)
+    env_parser.add_argument('--env-id', required=True)
+    env_parser.add_argument('--seed', type=int, default=42)
+    env_parser.add_argument('--max-episode-steps', type=int)
+    env_parser.set_defaults(func=audit_environment)
 
     vae_parser = commands.add_parser('train-vae')
     vae_parser.add_argument('--source', type=Path, required=True)
@@ -1152,11 +1346,12 @@ def parser() -> argparse.ArgumentParser:
     eval_parser.add_argument('--run-dir', type=Path, required=True)
     eval_parser.add_argument('--vae-dir', type=Path, required=True)
     eval_parser.add_argument('--output-dir', type=Path, required=True)
+    eval_parser.add_argument('--dataset-id', required=True)
     eval_parser.add_argument('--env-id', default='visual-cube-single-v0')
     eval_parser.add_argument('--episodes', type=int, default=10)
     eval_parser.add_argument('--seed', type=int, default=42)
-    eval_parser.add_argument('--max-episode-steps', type=int, default=50)
-    eval_parser.add_argument('--reward-task-id', type=int, default=2)
+    eval_parser.add_argument('--task-ids', type=int, nargs='+', default=[1, 2, 3, 4, 5])
+    eval_parser.add_argument('--max-episode-steps', type=int)
     eval_parser.set_defaults(func=evaluate)
     return root
 

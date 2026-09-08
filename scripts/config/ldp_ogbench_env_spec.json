@@ -3,7 +3,7 @@
   "checkout": "/root/data/yyf/stable-worldmodel-tdmpc2-ogbench8",
   "python": "/root/data/yyf/ogbench-new/.venv/bin/python",
   "overlay_installer": "/usr/bin/python3.10 -m pip --target",
-  "overlay": "/root/data/yyf/ldp-ogbench/runtime/site-packages",
+  "overlay": "/root/data/yyf/ldp-ogbench/runtime-v2/site-packages",
   "wheelhouse": "/root/data/yyf/ldp-wheelhouse",
   "base_packages": {
     "python": "3.10.12",
@@ -33,7 +33,11 @@
     "OPENBLAS_NUM_THREADS": "8",
     "MUJOCO_GL": "egl",
     "PYOPENGL_PLATFORM": "egl",
-    "OGBENCH_ROOT": "/root/data/yyf/ogbench-eval-main-20260830"
+    "OGBENCH_ROOT": "/root/data/yyf/ogbench-official-1d414099"
+  },
+  "ogbench": {
+    "repository": "https://github.com/seohongpark/ogbench.git",
+    "commit": "1d4140997f60c52c6fb0702ec100dc988b18c548"
   },
   "upstream": {
     "repository": "https://github.com/amberxie88/latent_diffusion_planning.git",

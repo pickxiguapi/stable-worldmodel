@@ -77,6 +77,13 @@ class OGBenchLDPData:
             self.segment_transitions = int(
                 source.attrs['segment_transitions']
             )
+            terminals = source['terminal'][:].astype(bool, copy=False)
+            rewards = source['reward'][:] if 'reward' in source else None
+            source_episodes = (
+                source['source_episode'][:]
+                if 'source_episode' in source
+                else None
+            )
             actions = source['action'][:]
             if not np.isfinite(actions).all():
                 raise ValueError('actions contain NaN or Inf')
@@ -91,6 +98,15 @@ class OGBenchLDPData:
             raise ValueError('Episode offsets are not contiguous')
         if int(self.offsets[-1] + self.lengths[-1]) != self.source_rows:
             raise ValueError('Episode metadata does not cover all source rows')
+        expected_terminals = np.zeros(self.source_rows, dtype=bool)
+        expected_terminals[self.offsets + self.lengths - 1] = True
+        if not np.array_equal(terminals, expected_terminals):
+            raise ValueError('terminal rows disagree with episode metadata')
+        if rewards is not None:
+            if not np.all(rewards[~expected_terminals] == -1.0):
+                raise ValueError('non-terminal rewards must be -1')
+            if not np.all(rewards[expected_terminals] == 0.0):
+                raise ValueError('terminal goal rewards must be 0')
 
         self.rows = self.source_rows
         self.latent_dim: int | None = None
@@ -126,7 +142,45 @@ class OGBenchLDPData:
             ) != latent_rows:
                 raise ValueError('Latent rows do not end on an episode boundary')
             self.rows = latent_rows
-        self.train_episodes = max(1, int(len(self.offsets) * train_fraction))
+        self._segment_source_ids = (
+            source_episodes[self.offsets] if source_episodes is not None else None
+        )
+        self.train_episodes = self.training_episode_count(
+            len(self.offsets), train_fraction
+        )
+        if source_episodes is not None and self.train_episodes < len(self.offsets):
+            train_end = int(
+                self.offsets[self.train_episodes - 1]
+                + self.lengths[self.train_episodes - 1]
+            )
+            validation_start = int(self.offsets[self.train_episodes])
+            train_ids = np.unique(source_episodes[:train_end])
+            validation_ids = np.unique(source_episodes[validation_start : self.rows])
+            overlap = np.intersect1d(train_ids, validation_ids)
+            if len(overlap):
+                raise ValueError(
+                    'train/validation segments share original source episodes: '
+                    f'{overlap[:10].tolist()}'
+                )
+
+    def training_episode_count(
+        self, total_episodes: int, train_fraction: float = 0.95
+    ) -> int:
+        """Choose a train boundary that does not split an original trajectory."""
+        if not 1 <= total_episodes <= len(self.offsets):
+            raise ValueError('total_episodes is outside the available prefix')
+        desired = max(1, int(total_episodes * train_fraction))
+        if self._segment_source_ids is not None and total_episodes > 1:
+            segment_source_ids = self._segment_source_ids[:total_episodes]
+            source_boundaries = np.flatnonzero(
+                segment_source_ids[1:] != segment_source_ids[:-1]
+            ) + 1
+            eligible = source_boundaries[source_boundaries <= desired]
+            if len(eligible):
+                return int(eligible[-1])
+            elif len(source_boundaries):
+                return int(source_boundaries[0])
+        return desired
 
     @property
     def summary(self) -> DatasetSummary:

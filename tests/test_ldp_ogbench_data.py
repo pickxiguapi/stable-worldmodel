@@ -9,6 +9,7 @@ from scripts.data.ldp_ogbench_data import (
     h5_take,
 )
 from scripts.train.ldp_ogbench import task_goal_residual
+from scripts.audit_ldp_ogbench8 import TaskSpec, validate_eval_result
 
 
 def make_data(source_path: Path, latent_path: Path) -> None:
@@ -108,14 +109,66 @@ def test_task_goal_residual_uses_generic_official_reward():
     class FakeEnv:
         unwrapped = None
 
-        def __init__(self, reward):
-            self.reward = reward
+        def __init__(self, successes):
+            self.successes = successes
             self.unwrapped = self
 
-        def compute_reward(self):
-            return self.reward
+        def _compute_successes(self):
+            return self.successes
 
-    assert task_goal_residual(FakeEnv(-3.0)) == 3.0
-    assert task_goal_residual(FakeEnv(0.0)) == 0.0
-    with np.testing.assert_raises_regex(RuntimeError, 'Non-finite'):
-        task_goal_residual(FakeEnv(np.nan))
+    assert task_goal_residual(FakeEnv([False, True, False])) == 2.0
+    assert task_goal_residual(FakeEnv(([True], [False, True], True, False))) == 2.0
+    assert task_goal_residual(FakeEnv([True, True])) == 0.0
+
+
+def test_completion_audit_checks_raw_episode_results():
+    spec = TaskSpec(
+        'cube_double_play',
+        'visual-cube-double-play-v0',
+        'visual-cube-double-v0',
+        0,
+    )
+    result = {
+        'dataset_id': 'visual-cube-double-play-v0',
+        'episodes_per_task': 2,
+        'task_ids': [1, 2, 3, 4, 5],
+        'total_episodes': 10,
+        'seed': 42,
+        'success_rate': 0.5,
+        'tasks': [
+            {
+                'task_id': task_id,
+                'task_name': f'task{task_id}',
+                'episodes': 2,
+                'success_rate': 0.5,
+                'episode_successes': [True, False],
+                'episode_returns': [1.0, 0.0],
+                'episode_lengths': [1, 500],
+                'initial_goal_residuals': [2.0, 2.0],
+                'final_goal_residuals': [0.0, 1.0],
+                'minimum_goal_residuals': [0.0, 1.0],
+                'mean_action_norms': [0.5, 0.75],
+            }
+            for task_id in range(1, 6)
+        ],
+        'environment': {
+            'id': 'visual-cube-double-v0',
+            'creation_api': 'ogbench.make_env_and_datasets(env_only=True)',
+            'max_episode_steps': 500,
+            'uses_registered_horizon': True,
+        },
+        'ogbench': {
+            'commit': '1d4140997f60c52c6fb0702ec100dc988b18c548',
+            'origin': 'https://github.com/seohongpark/ogbench.git',
+        },
+        'planner': {
+            'pred_horizon': 8,
+            'action_horizon': 4,
+            'diffusion_steps': 100,
+            'goal_conditioning': 'planner_global_condition_current_plus_final_goal',
+        },
+    }
+    assert validate_eval_result(result, spec, episodes=2, seed=42) == []
+    result['tasks'][2]['success_rate'] = 1.0
+    errors = validate_eval_result(result, spec, episodes=2, seed=42)
+    assert 'task 3 success_rate is inconsistent' in errors
