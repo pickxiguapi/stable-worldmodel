@@ -20,11 +20,21 @@ import numpy as np
 
 UPSTREAM_COMMIT = 'a26cbf1d2c0aec7adc5d9746f47831b162a41c0c'
 OGBENCH_COMMIT = '1d4140997f60c52c6fb0702ec100dc988b18c548'
+EXPECTED_EPISODES_PER_TASK = 10
 GOAL_CONDITIONING = 'planner_global_condition_current_plus_final_goal'
 IDM_CONDITIONING = 'adjacent_latent_transition_only'
 ANOMALY_PATTERN = re.compile(
     r'Traceback \(most recent call last\):|CUDA out of memory|'
     r'\b(?:NaN|nan)\b|\bFATAL\b|\bERROR\b'
+)
+EPISODE_PATTERN = re.compile(
+    r'^EPISODE task_id=(?P<task_id>\d+) episode=(?P<episode>\d+) '
+    r'success=(?P<success>[01]) return=(?P<return>[-+0-9.eE]+) '
+    r'length=(?P<length>\d+) '
+    r'initial_goal_residual=(?P<initial>[-+0-9.eE]+) '
+    r'final_goal_residual=(?P<final>[-+0-9.eE]+) '
+    r'min_goal_residual=(?P<minimum>[-+0-9.eE]+) '
+    r'mean_action_norm=(?P<action_norm>[-+0-9.eE]+)$'
 )
 
 NATIVE_HORIZONS = {
@@ -254,6 +264,167 @@ def validate_eval_result(
     return errors
 
 
+def validate_eval_log(
+    path: Path, result: dict[str, Any], episodes: int
+) -> list[str]:
+    errors: list[str] = []
+    records = []
+    logged_results = []
+    try:
+        for line in path.read_text(errors='replace').splitlines():
+            match = EPISODE_PATTERN.fullmatch(line)
+            if match:
+                records.append(match.groupdict())
+            if line.startswith('RESULT_JSON='):
+                logged_results.append(json.loads(line.split('=', 1)[1]))
+    except Exception as exc:
+        return [f'cannot parse evaluation evidence log {path}: {exc}']
+    if len(logged_results) != 1:
+        errors.append(
+            f'evaluation evidence log must contain exactly one RESULT_JSON, '
+            f'found {len(logged_results)}'
+        )
+    elif logged_results[0] != result:
+        errors.append('evaluation RESULT_JSON log record differs from results.json')
+    if len(records) != episodes * 5:
+        errors.append(
+            f'evaluation evidence log has {len(records)} episode records, '
+            f'expected {episodes * 5}'
+        )
+        return errors
+    tasks = result.get('tasks')
+    if not isinstance(tasks, list) or len(tasks) != 5:
+        return errors
+    expected = []
+    try:
+        for task in tasks:
+            if not isinstance(task, dict):
+                return errors
+            for episode_index in range(episodes):
+                expected.append(
+                    {
+                        'task_id': task.get('task_id'),
+                        'episode': episode_index + 1,
+                        'success': task.get('episode_successes', [])[episode_index],
+                        'return': task.get('episode_returns', [])[episode_index],
+                        'length': task.get('episode_lengths', [])[episode_index],
+                        'initial': task.get('initial_goal_residuals', [])[episode_index],
+                        'final': task.get('final_goal_residuals', [])[episode_index],
+                        'minimum': task.get('minimum_goal_residuals', [])[episode_index],
+                        'action_norm': task.get('mean_action_norms', [])[episode_index],
+                    }
+                )
+    except (IndexError, TypeError):
+        errors.append('evaluation result cannot be reconciled with episode log')
+        return errors
+    for index, (logged, wanted) in enumerate(zip(records, expected), start=1):
+        if int(logged['task_id']) != wanted['task_id'] or int(
+            logged['episode']
+        ) != wanted['episode']:
+            errors.append(f'episode log order mismatch at record {index}')
+            continue
+        if bool(int(logged['success'])) is not wanted['success']:
+            errors.append(f'episode success mismatch at record {index}')
+        if int(logged['length']) != wanted['length']:
+            errors.append(f'episode length mismatch at record {index}')
+        for key in ('return', 'initial', 'final', 'minimum', 'action_norm'):
+            if abs(float(logged[key]) - float(wanted[key])) > 5e-6:
+                errors.append(f'episode {key} mismatch at record {index}')
+    return errors
+
+
+def validate_artifact_binding(
+    result: dict[str, Any],
+    artifact_paths: dict[str, Path],
+    artifact_hashes: dict[str, str],
+) -> list[str]:
+    errors: list[str] = []
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            errors.append(message)
+
+    require(
+        result.get('method') == 'goal_conditioned_latent_diffusion_planning',
+        'evaluation method mismatch',
+    )
+    require(result.get('upstream_commit') == UPSTREAM_COMMIT, 'evaluation upstream mismatch')
+    artifacts = result.get('artifacts')
+    if not isinstance(artifacts, dict):
+        return errors + ['evaluation artifact provenance missing']
+    expected_steps = {'vae_checkpoint': 300_000, 'ldp_checkpoint': 500_000}
+    result_keys = {
+        'source': 'source',
+        'vae_config': 'vae_config',
+        'vae_checkpoint': 'vae_checkpoint',
+        'latents': 'latents',
+        'ldp_config': 'ldp_config',
+        'ldp_checkpoint': 'ldp_checkpoint',
+    }
+    for result_key, path_key in result_keys.items():
+        record = artifacts.get(result_key)
+        path = artifact_paths[path_key]
+        if not isinstance(record, dict):
+            errors.append(f'evaluation artifact record missing: {result_key}')
+            continue
+        require(record.get('path') == str(path), f'{result_key} path mismatch')
+        if path.is_file():
+            require(
+                record.get('size_bytes') == path.stat().st_size,
+                f'{result_key} size mismatch',
+            )
+        if result_key in expected_steps:
+            require(
+                record.get('step') == expected_steps[result_key],
+                f'{result_key} step mismatch',
+            )
+        if path_key in artifact_hashes:
+            require(
+                record.get('sha256') == artifact_hashes[path_key],
+                f'{result_key} hash mismatch',
+            )
+    ogbench = result.get('ogbench') or {}
+    module_file = ogbench.get('module_file')
+    root = ogbench.get('root')
+    if not isinstance(module_file, str) or not isinstance(root, str):
+        errors.append('imported OGBench module provenance missing')
+    else:
+        resolved_root = Path(root).resolve()
+        resolved_module = Path(module_file).resolve()
+        require(
+            resolved_module.is_file() and resolved_module.is_relative_to(resolved_root),
+            'imported OGBench module is not bound to verified checkout',
+        )
+        try:
+            actual_commit = subprocess.check_output(
+                ['git', '-C', str(resolved_root), 'rev-parse', 'HEAD'], text=True
+            ).strip()
+            actual_origin = subprocess.check_output(
+                ['git', '-C', str(resolved_root), 'remote', 'get-url', 'origin'],
+                text=True,
+            ).strip()
+            actual_dirty = subprocess.check_output(
+                [
+                    'git',
+                    '-C',
+                    str(resolved_root),
+                    'status',
+                    '--porcelain',
+                    '--untracked-files=no',
+                ],
+                text=True,
+            ).strip()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            errors.append(f'cannot independently attest OGBench checkout: {exc}')
+        else:
+            require(actual_commit == OGBENCH_COMMIT, 'OGBench checkout commit mismatch')
+            require(not actual_dirty, 'OGBench checkout is dirty')
+            require(ogbench.get('commit') == actual_commit, 'reported OGBench commit mismatch')
+            require(ogbench.get('origin') == actual_origin, 'reported OGBench origin mismatch')
+            require(str(resolved_root) == str(Path(root)), 'reported OGBench root is not canonical')
+    return errors
+
+
 def audit_task(
     spec: TaskSpec,
     dataset_root: Path,
@@ -280,6 +451,9 @@ def audit_task(
     )
 
     source_rows = source_episodes = action_dim = source_size = None
+    latent_vae_checkpoint_sha256 = None
+    latent_vae_config_sha256 = None
+    latent_source_sha256 = None
     if not source_path.is_file():
         audit.errors.append(f'missing source dataset: {source_path}')
     else:
@@ -302,6 +476,15 @@ def audit_task(
         audit.require(vae_config.get('kind') == 'ogbench_ldp_vae', 'VAE kind mismatch')
         audit.require(vae_config.get('source') == str(source_path), 'VAE source mismatch')
         audit.require(vae_config.get('source_size_bytes') == source_size, 'VAE source size mismatch')
+        audit.require(
+            bool(re.fullmatch(r'[0-9a-f]{64}', str(vae_config.get('source_sha256', '')))),
+            'VAE source hash missing or invalid',
+        )
+        audit.require(
+            vae_config.get('source_hash_recorded_stage')
+            == 'pre_latent_encoding_after_vae_completion',
+            'VAE source hash recording stage mismatch',
+        )
         audit.require(vae_config.get('steps') == 300_000, 'VAE steps config mismatch')
         audit.require(vae_config.get('batch_size') == 128, 'VAE batch size mismatch')
         audit.require(vae_config.get('seed') == seed, 'VAE seed mismatch')
@@ -347,11 +530,34 @@ def audit_task(
                 audit.require(int(latent_file.attrs.get('rows', -1)) == source_rows, 'latent rows attr mismatch')
                 audit.require(int(latent_file.attrs.get('episodes', -1)) == source_episodes, 'latent episodes attr mismatch')
                 audit.require(int(latent_file.attrs.get('source_size_bytes', -1)) == source_size, 'latent source size mismatch')
+                latent_source_sha256 = str(latent_file.attrs.get('source_sha256', ''))
+                audit.require(
+                    bool(re.fullmatch(r'[0-9a-f]{64}', latent_source_sha256)),
+                    'latent source hash missing or invalid',
+                )
                 audit.require(latent_file.attrs.get('normalization_split') == 'train_episodes_only', 'latent normalization split mismatch')
                 normalization_rows = int(latent_file.attrs.get('normalization_rows', -1))
                 audit.require(0 < normalization_rows < source_rows, 'latent normalization rows invalid')
                 validation_mse = float(latent_file.attrs.get('vae_validation_mse', np.nan))
                 audit.require(math.isfinite(validation_mse) and validation_mse <= 0.1, 'latent VAE validation gate failed')
+                audit.require(
+                    int(latent_file.attrs.get('vae_checkpoint_step', -1)) == 300_000,
+                    'latent VAE checkpoint step mismatch',
+                )
+                latent_vae_checkpoint_sha256 = str(
+                    latent_file.attrs.get('vae_checkpoint_sha256', '')
+                )
+                audit.require(
+                    bool(re.fullmatch(r'[0-9a-f]{64}', latent_vae_checkpoint_sha256)),
+                    'latent VAE checkpoint hash missing or invalid',
+                )
+                latent_vae_config_sha256 = str(
+                    latent_file.attrs.get('vae_config_sha256', '')
+                )
+                audit.require(
+                    bool(re.fullmatch(r'[0-9a-f]{64}', latent_vae_config_sha256)),
+                    'latent VAE config hash missing or invalid',
+                )
                 latent_min = math.inf
                 latent_max = -math.inf
                 finite = True
@@ -390,10 +596,23 @@ def audit_task(
             'validation_batches': 4,
             'seed': seed,
             'validation_rng_isolated_from_training': True,
+            'full_source_rows': True,
+            'vae_checkpoint_step': 300_000,
+            'source_sha256': latent_source_sha256,
+            'vae_config_sha256': latent_vae_config_sha256,
         }
         for key, value in expected.items():
             audit.require(ldp_config.get(key) == value, f'LDP config mismatch: {key}')
         audit.require(bool(ldp_config.get('adapter_commit')), 'LDP adapter_commit missing')
+        audit.require(
+            ldp_config.get('vae_checkpoint_sha256')
+            == latent_vae_checkpoint_sha256,
+            'LDP VAE checkpoint hash mismatch',
+        )
+        audit.require(
+            bool(re.fullmatch(r'[0-9a-f]{64}', str(ldp_config.get('latent_sha256', '')))),
+            'LDP latent hash missing or invalid',
+        )
 
     ldp_checkpoint = read_checkpoint(ldp_dir / 'checkpoint.msgpack', audit, 'LDP checkpoint')
     if ldp_checkpoint:
@@ -405,6 +624,24 @@ def audit_task(
         audit.evidence['ldp_checkpoint_step'] = ldp_checkpoint_step
         del ldp_checkpoint
         gc.collect()
+
+    events_path = ldp_dir / 'events.jsonl'
+    if events_path.is_file():
+        try:
+            resume_events = [
+                json.loads(line)
+                for line in events_path.read_text().splitlines()
+                if line.strip()
+            ]
+        except Exception as exc:
+            audit.errors.append(f'cannot parse LDP resume events: {exc}')
+        else:
+            inexact = [
+                event
+                for event in resume_events
+                if event.get('kind') == 'ldp_resume' and event.get('exact') is not True
+            ]
+            audit.require(not inexact, 'LDP history contains an inexact resume')
 
     ldp_metric = last_metric(ldp_dir / 'metrics.jsonl', audit, 'LDP metrics')
     if ldp_metric:
@@ -421,25 +658,17 @@ def audit_task(
         )
         audit.evidence['ldp_final_metrics'] = ldp_metric
 
-    result = read_json(eval_path, audit, 'evaluation result')
-    if result:
-        audit.errors.extend(validate_eval_result(result, spec, episodes, eval_seed))
-        audit.evidence['success_rate'] = result.get('success_rate')
-        audit.evidence['task_success_rates'] = [
-            task.get('success_rate') for task in result.get('tasks', [])
-        ]
-
+    formal_log_text = None
     if not log_path.is_file():
         audit.errors.append(f'missing formal log: {log_path}')
     else:
-        matches = ANOMALY_PATTERN.findall(log_path.read_text(errors='replace'))
+        formal_log_text = log_path.read_text(errors='replace')
+        matches = ANOMALY_PATTERN.findall(formal_log_text)
         audit.require(not matches, f'formal log contains {len(matches)} anomaly markers')
-    if not eval_log_path.is_file():
-        audit.errors.append(f'missing official evaluation log: {eval_log_path}')
-    else:
-        matches = ANOMALY_PATTERN.findall(
-            eval_log_path.read_text(errors='replace')
-        )
+    eval_log_text = None
+    if eval_log_path.is_file():
+        eval_log_text = eval_log_path.read_text(errors='replace')
+        matches = ANOMALY_PATTERN.findall(eval_log_text)
         audit.require(
             not matches,
             f'official evaluation log contains {len(matches)} anomaly markers',
@@ -454,11 +683,73 @@ def audit_task(
         'ldp_checkpoint': ldp_dir / 'checkpoint.msgpack',
         'evaluation': eval_path,
     }
-    audit.evidence['artifact_sha256'] = {
+    artifact_hashes = {
         key: sha256_file(path)
         for key, path in artifact_paths.items()
         if path.is_file()
     }
+    audit.evidence['artifact_sha256'] = artifact_hashes
+    if vae_config:
+        audit.require(
+            vae_config.get('source_sha256') == artifact_hashes.get('source'),
+            'VAE config source hash differs from artifact',
+        )
+    if latent_path.is_file():
+        audit.require(
+            latent_source_sha256 == artifact_hashes.get('source'),
+            'latent source hash differs from artifact',
+        )
+        audit.require(
+            latent_vae_config_sha256 == artifact_hashes.get('vae_config'),
+            'latent VAE config hash differs from artifact',
+        )
+    if ldp_config:
+        audit.require(
+            ldp_config.get('source_sha256') == artifact_hashes.get('source'),
+            'LDP config source hash differs from artifact',
+        )
+        audit.require(
+            ldp_config.get('vae_config_sha256')
+            == artifact_hashes.get('vae_config'),
+            'LDP config VAE config hash differs from artifact',
+        )
+        audit.require(
+            ldp_config.get('vae_checkpoint_sha256')
+            == artifact_hashes.get('vae_checkpoint'),
+            'LDP config VAE checkpoint hash differs from artifact',
+        )
+        audit.require(
+            ldp_config.get('latent_sha256') == artifact_hashes.get('latents'),
+            'LDP config latent hash differs from artifact',
+        )
+
+    result = read_json(eval_path, audit, 'evaluation result')
+    if result:
+        audit.errors.extend(validate_eval_result(result, spec, episodes, eval_seed))
+        audit.errors.extend(
+            validate_artifact_binding(result, artifact_paths, artifact_hashes)
+        )
+        evidence_log = None
+        if eval_log_text is not None and 'RESULT_JSON=' in eval_log_text:
+            evidence_log = eval_log_path
+        elif formal_log_text is not None and 'RESULT_JSON=' in formal_log_text:
+            evidence_log = log_path
+            audit.warnings.append(
+                'evaluation evidence is in the formal pipeline log rather than '
+                'the dedicated official evaluation log'
+            )
+        if evidence_log is None:
+            audit.errors.append('missing evaluation log with RESULT_JSON evidence')
+        else:
+            audit.errors.extend(validate_eval_log(evidence_log, result, episodes))
+            audit.evidence['evaluation_log'] = str(evidence_log)
+        audit.evidence['success_rate'] = result.get('success_rate')
+        tasks = result.get('tasks')
+        if isinstance(tasks, list):
+            audit.evidence['task_success_rates'] = [
+                task.get('success_rate') if isinstance(task, dict) else None
+                for task in tasks
+            ]
 
     return audit
 
@@ -471,6 +762,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument('--seed', type=int, default=1)
     result.add_argument('--episodes', type=int, default=10)
     result.add_argument('--eval-seed', type=int, default=42)
+    result.add_argument('--task-index', type=int, choices=range(len(TASKS)))
     result.add_argument('--output', type=Path)
     return result
 
@@ -488,10 +780,16 @@ def main() -> None:
         ['git', '-C', str(root), 'status', '--porcelain'], text=True
     ).strip()
     global_errors = []
+    if args.episodes != EXPECTED_EPISODES_PER_TASK:
+        global_errors.append(
+            f'completion audit requires exactly {EXPECTED_EPISODES_PER_TASK} '
+            f'episodes per task, got {args.episodes}'
+        )
     if adapter_head != adapter_main:
         global_errors.append('completion auditor checkout does not match origin/main')
     if adapter_dirty:
         global_errors.append('completion auditor checkout is dirty')
+    selected_tasks = TASKS if args.task_index is None else (TASKS[args.task_index],)
     audits = [
         audit_task(
             spec,
@@ -502,7 +800,7 @@ def main() -> None:
             args.episodes,
             args.eval_seed,
         )
-        for spec in TASKS
+        for spec in selected_tasks
     ]
     report = {
         'kind': 'ldp_ogbench8_completion_audit',

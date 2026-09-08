@@ -8,6 +8,7 @@ the inverse-dynamics model remains conditioned only on adjacent latent states.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -127,6 +128,28 @@ def verify_ogbench() -> dict[str, str]:
     if remote.rstrip('/').removesuffix('.git') != 'https://github.com/seohongpark/ogbench':
         raise RuntimeError(f'Unexpected OGBench origin: {remote}')
     return {'commit': commit, 'origin': remote, 'root': str(root)}
+
+
+def bind_ogbench_import(
+    provenance: dict[str, str], ogbench_module: Any
+) -> dict[str, str]:
+    module_file = Path(ogbench_module.__file__).resolve()
+    root = Path(provenance['root']).resolve()
+    try:
+        module_file.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(
+            f'Imported ogbench module {module_file} is outside verified checkout {root}'
+        ) from exc
+    return {**provenance, 'module_file': str(module_file)}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open('rb') as stream:
+        for chunk in iter(lambda: stream.read(8 * 1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def write_json(path: Path, value: dict[str, Any]) -> None:
@@ -464,7 +487,18 @@ def load_vae_run(run_dir: Path):
     vae_adapter_commit, commit_source = resolve_vae_adapter_commit(run_dir, config)
     config['adapter_commit'] = vae_adapter_commit
     config['adapter_commit_source'] = commit_source
-    checkpoint = load_msgpack(run_dir / 'checkpoint.msgpack')
+    checkpoint_path = run_dir / 'checkpoint.msgpack'
+    checkpoint = load_msgpack(checkpoint_path)
+    checkpoint_step = int(checkpoint['step'])
+    configured_steps = int(config['steps'])
+    if checkpoint_step != configured_steps:
+        raise RuntimeError(
+            f'VAE checkpoint step {checkpoint_step} does not match completed '
+            f'configuration step {configured_steps}'
+        )
+    config['checkpoint_step'] = checkpoint_step
+    config['checkpoint_sha256'] = file_sha256(checkpoint_path)
+    config['checkpoint_path'] = str(checkpoint_path)
     return make_vae(), checkpoint['ema_params'], config
 
 
@@ -476,6 +510,18 @@ def encode(args: argparse.Namespace) -> None:
     encoding_adapter_commit = adapter_commit()
     data = OGBenchLDPData(args.source)
     vae, params, vae_config = load_vae_run(args.vae_dir)
+    source_sha256 = file_sha256(data.source_path)
+    vae_config_path = args.vae_dir.expanduser().resolve() / 'config.json'
+    persisted_vae_config = json.loads(vae_config_path.read_text())
+    recorded_source_sha256 = persisted_vae_config.get('source_sha256')
+    if recorded_source_sha256 not in (None, source_sha256):
+        raise RuntimeError('VAE config source hash does not match the source dataset')
+    persisted_vae_config['source_sha256'] = source_sha256
+    persisted_vae_config[
+        'source_hash_recorded_stage'
+    ] = 'pre_latent_encoding_after_vae_completion'
+    write_json(vae_config_path, persisted_vae_config)
+    vae_config_sha256 = file_sha256(vae_config_path)
     output = args.output.expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
@@ -571,6 +617,7 @@ def encode(args: argparse.Namespace) -> None:
                     print(f'ENCODE_PROGRESS={end}/{rows}', flush=True)
             destination.attrs['source'] = str(data.source_path)
             destination.attrs['source_size_bytes'] = data.source_path.stat().st_size
+            destination.attrs['source_sha256'] = source_sha256
             destination.attrs['source_rows'] = data.source_rows
             destination.attrs['rows'] = rows
             destination.attrs['episodes'] = episodes
@@ -588,6 +635,13 @@ def encode(args: argparse.Namespace) -> None:
             destination.attrs['vae_adapter_commit_source'] = vae_config[
                 'adapter_commit_source'
             ]
+            destination.attrs['vae_checkpoint_step'] = vae_config[
+                'checkpoint_step'
+            ]
+            destination.attrs['vae_checkpoint_sha256'] = vae_config[
+                'checkpoint_sha256'
+            ]
+            destination.attrs['vae_config_sha256'] = vae_config_sha256
             destination.attrs['encoding_adapter_commit'] = encoding_adapter_commit
             # Retained for compatibility with latent files created before the
             # two adapter stages were named explicitly.
@@ -684,12 +738,33 @@ def train_ldp(args: argparse.Namespace) -> None:
 
     commit = verify_upstream()
     data = OGBenchLDPData(args.source, args.latents)
+    if not args.allow_partial_latents and data.rows != data.source_rows:
+        raise RuntimeError(
+            f'Formal LDP training requires all {data.source_rows} source rows; '
+            f'latent file contains {data.rows}'
+        )
     data.load_training_arrays()
     with h5py.File(data.latent_path, 'r') as latent_file:
         vae_adapter_commit = str(latent_file.attrs['vae_adapter_commit'])
         encoding_adapter_commit = str(
             latent_file.attrs['encoding_adapter_commit']
         )
+        vae_checkpoint_step = int(latent_file.attrs['vae_checkpoint_step'])
+        vae_checkpoint_sha256 = str(
+            latent_file.attrs['vae_checkpoint_sha256']
+        )
+        source_sha256 = str(latent_file.attrs['source_sha256'])
+        vae_config_sha256 = str(latent_file.attrs['vae_config_sha256'])
+        encoded_vae_config_path = (
+            Path(str(latent_file.attrs['vae_dir'])).expanduser().resolve()
+            / 'config.json'
+        )
+    current_source_sha256 = file_sha256(data.source_path)
+    if current_source_sha256 != source_sha256:
+        raise RuntimeError('Source dataset hash changed after latent encoding')
+    if file_sha256(encoded_vae_config_path) != vae_config_sha256:
+        raise RuntimeError('VAE config hash changed after latent encoding')
+    latent_sha256 = file_sha256(data.latent_path)
     output = args.output_dir.expanduser().resolve()
     planner, idm = make_ldp_models(data.latent_dim, data.action_dim)
     planner_scheduler, planner_scheduler_state, idm_scheduler, idm_scheduler_state = (
@@ -726,6 +801,12 @@ def train_ldp(args: argparse.Namespace) -> None:
         'adapter_commit': adapter_commit(),
         'vae_adapter_commit': vae_adapter_commit,
         'encoding_adapter_commit': encoding_adapter_commit,
+        'vae_checkpoint_step': vae_checkpoint_step,
+        'vae_checkpoint_sha256': vae_checkpoint_sha256,
+        'vae_config_sha256': vae_config_sha256,
+        'source_sha256': source_sha256,
+        'latent_sha256': latent_sha256,
+        'full_source_rows': data.rows == data.source_rows,
         'goal_conditioning': 'planner_global_condition_current_plus_final_goal',
         'idm_conditioning': 'adjacent_latent_transition_only',
         'source': str(data.source_path),
@@ -879,12 +960,15 @@ def train_ldp(args: argparse.Namespace) -> None:
                     ]
                     elapsed_offset = float(resume_state.get('elapsed_seconds', 0.0))
                     exact_resume = True
-        if not exact_resume and not stateful_checkpoint:
-            opt_state = optimizer.init(params)
-            opt_state = restore_optimizer_schedule_step(opt_state, start_step)
-            train_rng = jax.random.fold_in(jax.random.PRNGKey(args.seed), start_step)
-            validation_rng = jax.random.fold_in(
-                jax.random.PRNGKey(args.seed + 1_000_003), start_step
+            if not exact_resume:
+                raise RuntimeError(
+                    'Stateful LDP checkpoint cannot be resumed exactly because '
+                    'resume_state.json is missing or has a different step'
+                )
+        else:
+            raise RuntimeError(
+                'Legacy LDP checkpoint lacks optimizer/RNG state and cannot be '
+                'resumed exactly'
             )
         resume_event = {
             'kind': 'ldp_resume',
@@ -1164,6 +1248,7 @@ def audit_environment(args: argparse.Namespace) -> None:
     commit = adapter_commit()
     ogbench_provenance = verify_ogbench()
     import ogbench
+    ogbench_provenance = bind_ogbench_import(ogbench_provenance, ogbench)
 
     env = make_official_eval_env(
         ogbench, args.dataset_id, args.env_id, args.max_episode_steps
@@ -1220,15 +1305,53 @@ def evaluate(args: argparse.Namespace) -> None:
     evaluation_adapter_commit = adapter_commit()
     ogbench_provenance = verify_ogbench()
     import ogbench
+    ogbench_provenance = bind_ogbench_import(ogbench_provenance, ogbench)
     run_dir = args.run_dir.expanduser().resolve()
     config = json.loads((run_dir / 'config.json').read_text())
     if config['upstream_commit'] != UPSTREAM_COMMIT:
         raise RuntimeError('LDP checkpoint upstream commit mismatch')
-    checkpoint = load_msgpack(run_dir / 'checkpoint.msgpack')
+    checkpoint_path = run_dir / 'checkpoint.msgpack'
+    checkpoint = load_msgpack(checkpoint_path)
+    checkpoint_step = int(checkpoint['step'])
+    if checkpoint_step != int(config['steps']):
+        raise RuntimeError(
+            f'LDP checkpoint step {checkpoint_step} does not match completed '
+            f'configuration step {config["steps"]}'
+        )
+    source_path = Path(config['source']).expanduser().resolve()
+    if source_path.name != f'{args.dataset_id}.h5':
+        raise RuntimeError(
+            f'Evaluation dataset {args.dataset_id} does not match trained source '
+            f'{source_path.name}'
+        )
+    source_sha256 = file_sha256(source_path)
+    if source_sha256 != config.get('source_sha256'):
+        raise RuntimeError('Source dataset hash changed after LDP training')
+    latent_path = Path(config['latents']).expanduser().resolve()
+    if not latent_path.is_file():
+        raise FileNotFoundError(f'LDP latent file is missing: {latent_path}')
+    if latent_path.stat().st_size != int(config['latent_size_bytes']):
+        raise RuntimeError('LDP latent file size changed after training')
+    latent_sha256 = file_sha256(latent_path)
+    if latent_sha256 != config.get('latent_sha256'):
+        raise RuntimeError('LDP latent file hash changed after training')
     sampler = make_sampler(config, checkpoint['params'])
     vae, vae_params, vae_config = load_vae_run(args.vae_dir)
     if vae_config['source_size_bytes'] != config['source_size_bytes']:
         raise RuntimeError('VAE and LDP were not trained from the same source data')
+    if vae_config['adapter_commit'] != config.get('vae_adapter_commit'):
+        raise RuntimeError('Evaluation VAE adapter commit does not match LDP training')
+    if vae_config['checkpoint_step'] != config.get('vae_checkpoint_step'):
+        raise RuntimeError('Evaluation VAE checkpoint step does not match LDP training')
+    if vae_config['checkpoint_sha256'] != config.get('vae_checkpoint_sha256'):
+        raise RuntimeError('Evaluation VAE checkpoint hash does not match LDP training')
+    vae_config_path = args.vae_dir.expanduser().resolve() / 'config.json'
+    vae_config_sha256 = file_sha256(vae_config_path)
+    if vae_config_sha256 != config.get('vae_config_sha256'):
+        raise RuntimeError('Evaluation VAE config hash does not match LDP training')
+    ldp_config_path = run_dir / 'config.json'
+    ldp_config_sha256 = file_sha256(ldp_config_path)
+    ldp_checkpoint_sha256 = file_sha256(checkpoint_path)
 
     @jax.jit
     def encode_pixels(pixels):
@@ -1365,6 +1488,40 @@ def evaluate(args: argparse.Namespace) -> None:
         'evaluation_adapter_commit': evaluation_adapter_commit,
         'ogbench': ogbench_provenance,
         'checkpoint': str(run_dir / 'checkpoint.msgpack'),
+        'artifacts': {
+            'source': {
+                'path': str(source_path),
+                'size_bytes': source_path.stat().st_size,
+                'sha256': source_sha256,
+            },
+            'vae_config': {
+                'path': str(vae_config_path),
+                'size_bytes': vae_config_path.stat().st_size,
+                'sha256': vae_config_sha256,
+            },
+            'vae_checkpoint': {
+                'path': vae_config['checkpoint_path'],
+                'size_bytes': Path(vae_config['checkpoint_path']).stat().st_size,
+                'step': vae_config['checkpoint_step'],
+                'sha256': vae_config['checkpoint_sha256'],
+            },
+            'latents': {
+                'path': str(latent_path),
+                'size_bytes': latent_path.stat().st_size,
+                'sha256': latent_sha256,
+            },
+            'ldp_checkpoint': {
+                'path': str(checkpoint_path),
+                'size_bytes': checkpoint_path.stat().st_size,
+                'step': checkpoint_step,
+                'sha256': ldp_checkpoint_sha256,
+            },
+            'ldp_config': {
+                'path': str(ldp_config_path),
+                'size_bytes': ldp_config_path.stat().st_size,
+                'sha256': ldp_config_sha256,
+            },
+        },
         'dataset_id': args.dataset_id,
         'episodes_per_task': args.episodes,
         'task_ids': args.task_ids,
@@ -1448,6 +1605,11 @@ def parser() -> argparse.ArgumentParser:
     ldp_parser.add_argument('--seed', type=int, default=1)
     ldp_parser.add_argument('--log-every', type=int, default=100)
     ldp_parser.add_argument('--save-every', type=int, default=10_000)
+    ldp_parser.add_argument(
+        '--allow-partial-latents',
+        action='store_true',
+        help='Allow prefix-only latent files for explicitly marked smoke tests.',
+    )
     ldp_parser.add_argument('--resume', action='store_true')
     ldp_parser.set_defaults(func=train_ldp)
 

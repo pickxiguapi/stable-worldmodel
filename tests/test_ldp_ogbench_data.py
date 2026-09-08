@@ -1,9 +1,14 @@
+import json
 from pathlib import Path
 
 import h5py
 import numpy as np
 
-from scripts.audit_ldp_ogbench8 import TaskSpec, validate_eval_result
+from scripts.audit_ldp_ogbench8 import (
+    TaskSpec,
+    validate_eval_log,
+    validate_eval_result,
+)
 from scripts.data.ldp_ogbench_data import (
     OGBenchLDPData,
     REWARD_SCHEME,
@@ -233,3 +238,51 @@ def test_completion_audit_checks_raw_episode_results():
     result['tasks'][2]['success_rate'] = 1.0
     errors = validate_eval_result(result, spec, episodes=2, seed=42)
     assert 'task 3 success_rate is inconsistent' in errors
+
+
+def test_completion_audit_reconciles_episode_log(tmp_path):
+    episodes = 2
+    tasks = []
+    lines = []
+    for task_id in range(1, 6):
+        successes = [True, False]
+        returns = [1.0, 0.0]
+        lengths = [1, 500]
+        initial = [2.0, 2.0]
+        final = [0.0, 1.0]
+        minimum = [0.0, 1.0]
+        action_norms = [0.5, 0.75]
+        tasks.append(
+            {
+                'task_id': task_id,
+                'task_name': f'task{task_id}',
+                'episodes': episodes,
+                'success_rate': 0.5,
+                'episode_successes': successes,
+                'episode_returns': returns,
+                'episode_lengths': lengths,
+                'initial_goal_residuals': initial,
+                'final_goal_residuals': final,
+                'minimum_goal_residuals': minimum,
+                'mean_action_norms': action_norms,
+            }
+        )
+        for episode in range(episodes):
+            lines.append(
+                f'EPISODE task_id={task_id} episode={episode + 1} '
+                f'success={int(successes[episode])} '
+                f'return={returns[episode]:.6f} length={lengths[episode]} '
+                f'initial_goal_residual={initial[episode]:.6f} '
+                f'final_goal_residual={final[episode]:.6f} '
+                f'min_goal_residual={minimum[episode]:.6f} '
+                f'mean_action_norm={action_norms[episode]:.6f}'
+            )
+    result = {'tasks': tasks}
+    lines.append('RESULT_JSON=' + json.dumps(result, sort_keys=True))
+    path = tmp_path / 'eval.log'
+    path.write_text('\n'.join(lines) + '\n')
+    assert validate_eval_log(path, result, episodes) == []
+    path.write_text(path.read_text().replace('success=1', 'success=0', 1))
+    assert 'episode success mismatch at record 1' in validate_eval_log(
+        path, result, episodes
+    )

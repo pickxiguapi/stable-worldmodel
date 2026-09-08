@@ -40,6 +40,8 @@ EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 ALLOW_NONSTANDARD_HORIZON=${ALLOW_NONSTANDARD_HORIZON:-0}
+FORMAL_EPISODES=10
+FORMAL_TASK_IDS='1 2 3 4 5'
 MIN_FREE_MEMORY_MIB=${MIN_FREE_MEMORY_MIB:-17000}
 MIN_FREE_DISK_GIB=${MIN_FREE_DISK_GIB:-32}
 XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.18}
@@ -83,6 +85,46 @@ validate_index() {
   local index=$1
   if [[ ! "$index" =~ ^[0-7]$ ]]; then
     echo "TASK_INDEX must be an integer in [0, 7], got: $index" >&2
+    exit 2
+  fi
+}
+
+require_formal_eval_contract() {
+  local normalized_task_ids
+  local -a requested_task_ids=()
+  read -r -a requested_task_ids <<< "$EVAL_TASK_IDS"
+  normalized_task_ids="${requested_task_ids[*]}"
+  if [[ "$EPISODES" != "$FORMAL_EPISODES" ]]; then
+    echo "Formal evaluation requires EPISODES=$FORMAL_EPISODES, got: $EPISODES" >&2
+    exit 2
+  fi
+  if [[ "$normalized_task_ids" != "$FORMAL_TASK_IDS" ]]; then
+    echo "Formal evaluation requires EVAL_TASK_IDS='$FORMAL_TASK_IDS', got: '$normalized_task_ids'" >&2
+    exit 2
+  fi
+  if [[ -n "$MAX_EPISODE_STEPS" ]]; then
+    echo "Formal evaluation must use the registered OGBench horizon" >&2
+    exit 2
+  fi
+  if [[ "$ALLOW_NONSTANDARD_HORIZON" != 0 ]]; then
+    echo "ALLOW_NONSTANDARD_HORIZON is smoke-only" >&2
+    exit 2
+  fi
+}
+
+require_formal_pipeline_contract() {
+  require_formal_eval_contract
+  local mismatches=()
+  [[ "$VAE_STEPS" == 300000 ]] || mismatches+=("VAE_STEPS=$VAE_STEPS")
+  [[ "$VAE_BATCH_SIZE" == 128 ]] || mismatches+=("VAE_BATCH_SIZE=$VAE_BATCH_SIZE")
+  [[ "$LDP_STEPS" == 500000 ]] || mismatches+=("LDP_STEPS=$LDP_STEPS")
+  [[ "$LDP_BATCH_SIZE" == 128 ]] || mismatches+=("LDP_BATCH_SIZE=$LDP_BATCH_SIZE")
+  [[ "$PRED_HORIZON" == 8 ]] || mismatches+=("PRED_HORIZON=$PRED_HORIZON")
+  [[ "$ACTION_HORIZON" == 4 ]] || mismatches+=("ACTION_HORIZON=$ACTION_HORIZON")
+  [[ "$DIFFUSION_STEPS" == 100 ]] || mismatches+=("DIFFUSION_STEPS=$DIFFUSION_STEPS")
+  [[ -z ${MAX_ENCODE_EPISODES:-} ]] || mismatches+=("MAX_ENCODE_EPISODES=${MAX_ENCODE_EPISODES}")
+  if (( ${#mismatches[@]} )); then
+    echo "Formal pipeline contract mismatch: ${mismatches[*]}" >&2
     exit 2
   fi
 }
@@ -192,11 +234,13 @@ smoke_missing() {
 
 launch_one() {
   : "${TASK_INDEX:?TASK_INDEX is required for MODE=launch-one}"
+  require_formal_pipeline_contract
   run_base "$TASK_INDEX" launch
 }
 
 launch_missing() {
   local index
+  require_formal_pipeline_contract
   # Index 0 is the existing cube-single-play formal run on GPU 6.
   for index in 1 2 3 4 5 6 7; do
     echo "FORMAL_LAUNCH index=$index gpu=${gpu_ids[$index]} dataset=${dataset_ids[$index]}"
@@ -208,19 +252,33 @@ launch_missing() {
 
 eval_one() {
   : "${TASK_INDEX:?TASK_INDEX is required for MODE=eval-one}"
+  require_formal_eval_contract
   run_base "$TASK_INDEX" eval
 }
 
 eval_result_valid() {
   local index=$1
   local result=$2
-  "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r["environment"]; assert r["dataset_id"]==sys.argv[2]; assert r["task_ids"]==[1,2,3,4,5]; assert r["episodes_per_task"]==int(sys.argv[3]); assert r["total_episodes"]==5*int(sys.argv[3]); assert r["seed"]==int(sys.argv[4]); assert len(r["tasks"])==5; assert [t["task_id"] for t in r["tasks"]]==[1,2,3,4,5]; assert all(t["episodes"]==int(sys.argv[3]) for t in r["tasks"]); assert e["id"]==sys.argv[5]; assert e["uses_registered_horizon"] is True; assert e["max_episode_steps"]==int(sys.argv[6])' \
-    "$result" "${dataset_ids[$index]}" "$EPISODES" "$EVAL_SEED" \
+  "$PYTHON_BIN" -c 'import json,sys; r=json.load(open(sys.argv[1])); e=r.get("environment"); tasks=r.get("tasks"); n=int(sys.argv[3]); valid=isinstance(e,dict) and isinstance(tasks,list) and r.get("dataset_id")==sys.argv[2] and r.get("task_ids")==[1,2,3,4,5] and r.get("episodes_per_task")==n and r.get("total_episodes")==5*n and r.get("seed")==int(sys.argv[4]) and len(tasks)==5 and all(isinstance(t,dict) for t in tasks) and [t.get("task_id") for t in tasks]==[1,2,3,4,5] and all(t.get("episodes")==n for t in tasks) and e.get("id")==sys.argv[5] and e.get("uses_registered_horizon") is True and e.get("max_episode_steps")==int(sys.argv[6]); raise SystemExit(0 if valid else 1)' \
+    "$result" "${dataset_ids[$index]}" "$FORMAL_EPISODES" "$EVAL_SEED" \
     "${env_ids[$index]}" "${native_horizons[$index]}" 2>/dev/null
 }
 
+eval_result_fully_valid() {
+  local index=$1
+  cd "$STABLEWM_ROOT"
+  PYTHONPATH="$LDP_OVERLAY:$STABLEWM_ROOT${PYTHONPATH:+:$PYTHONPATH}" \
+    "$PYTHON_BIN" scripts/audit_ldp_ogbench8.py \
+      --dataset-root "$DATASET_ROOT" \
+      --artifact-root "$ARTIFACT_ROOT" \
+      --label "$CORE_LABEL" --seed "$SEED" \
+      --episodes "$FORMAL_EPISODES" --eval-seed "$EVAL_SEED" \
+      --task-index "$index"
+}
+
 launch_eval_ready() {
-  local index name formal_session eval_session formal_log eval_log ldp eval
+  require_formal_eval_contract
+  local index name formal_session eval_session formal_log eval_log ldp ldp_config ldp_state eval
   local eval_dir quarantine
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
@@ -229,9 +287,12 @@ launch_eval_ready() {
     formal_log="$ARTIFACT_ROOT/$name.log"
     eval_log="$ARTIFACT_ROOT/${name}_official_eval.log"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
-    eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
+    ldp_config="$ARTIFACT_ROOT/runs/${name}_ldp/config.json"
+    ldp_state="$ARTIFACT_ROOT/runs/${name}_ldp/resume_state.json"
+    eval="$ARTIFACT_ROOT/evals/${name}_eval${FORMAL_EPISODES}_s${EVAL_SEED}/results.json"
+    eval_dir=${eval%/results.json}
     if [[ -s "$eval" ]]; then
-      if eval_result_valid "$index" "$eval"; then
+      if eval_result_fully_valid "$index" >/dev/null; then
         echo "EVAL_ALREADY_COMPLETE index=$index result=$eval"
         continue
       fi
@@ -243,7 +304,6 @@ launch_eval_ready() {
         echo "EVAL_INVALID_WAIT_EVAL_SESSION index=$index result=$eval" >&2
         continue
       fi
-      eval_dir=${eval%/results.json}
       quarantine="${eval_dir}_invalid_$(date +%Y%m%dT%H%M%S)"
       mv "$eval_dir" "$quarantine"
       echo "EVAL_INVALID_QUARANTINED index=$index from=$eval_dir to=$quarantine" >&2
@@ -256,13 +316,19 @@ launch_eval_ready() {
       echo "EVAL_ALREADY_RUNNING index=$index session=$eval_session"
       continue
     fi
-    if [[ ! -s "$ldp" ]] || [[ ! -f "$formal_log" ]] \
-      || ! grep -q 'LDP_COMPLETE=' "$formal_log"; then
+    if [[ -d "$eval_dir" && ! -s "$eval" ]]; then
+      quarantine="${eval_dir}_incomplete_$(date +%Y%m%dT%H%M%S)"
+      mv "$eval_dir" "$quarantine"
+      echo "EVAL_INCOMPLETE_QUARANTINED index=$index from=$eval_dir to=$quarantine" >&2
+    fi
+    if [[ ! -s "$ldp" ]] || [[ ! -s "$ldp_config" ]] || [[ ! -s "$ldp_state" ]] \
+      || [[ ! -f "$formal_log" ]] || ! grep -q 'LDP_COMPLETE=' "$formal_log" \
+      || ! "$PYTHON_BIN" -c 'import json,sys; c=json.load(open(sys.argv[1])); s=json.load(open(sys.argv[2])); raise SystemExit(0 if c.get("steps")==500000 and s.get("step")==500000 else 1)' "$ldp_config" "$ldp_state" 2>/dev/null; then
       echo "EVAL_NOT_READY index=$index"
       continue
     fi
     tmux new-session -d -s "$eval_session" \
-      "cd '$STABLEWM_ROOT' && MODE=eval-one TASK_INDEX='$index' DATASET_ROOT='$DATASET_ROOT' ARTIFACT_ROOT='$ARTIFACT_ROOT' CORE_LABEL='$CORE_LABEL' SEED='$SEED' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' EVAL_TASK_IDS='$EVAL_TASK_IDS' MAX_EPISODE_STEPS='' ALLOW_NONSTANDARD_HORIZON='0' LDP_RUNTIME_ROOT='$LDP_RUNTIME_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' XLA_PYTHON_CLIENT_MEM_FRACTION='$XLA_PYTHON_CLIENT_MEM_FRACTION' bash '$0' 2>&1 | tee '$eval_log'"
+      "cd '$STABLEWM_ROOT' && MODE=eval-one TASK_INDEX='$index' DATASET_ROOT='$DATASET_ROOT' ARTIFACT_ROOT='$ARTIFACT_ROOT' CORE_LABEL='$CORE_LABEL' SEED='$SEED' EPISODES='$FORMAL_EPISODES' EVAL_SEED='$EVAL_SEED' EVAL_TASK_IDS='$FORMAL_TASK_IDS' MAX_EPISODE_STEPS='' ALLOW_NONSTANDARD_HORIZON='0' LDP_RUNTIME_ROOT='$LDP_RUNTIME_ROOT' OGBENCH_ROOT='$OGBENCH_ROOT' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' XLA_PYTHON_CLIENT_MEM_FRACTION='$XLA_PYTHON_CLIENT_MEM_FRACTION' bash '$0' 2>&1 | tee '$eval_log'"
     echo "EVAL_LAUNCHED index=$index gpu=${gpu_ids[$index]} session=$eval_session log=$eval_log"
   done
 }
@@ -320,7 +386,7 @@ status() {
     vae="$ARTIFACT_ROOT/runs/${name}_vae/checkpoint.msgpack"
     latent="$ARTIFACT_ROOT/data/${name}_latents.h5"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
-    eval="$ARTIFACT_ROOT/evals/${name}_eval${EPISODES}_s${EVAL_SEED}/results.json"
+    eval="$ARTIFACT_ROOT/evals/${name}_eval${FORMAL_EPISODES}_s${EVAL_SEED}/results.json"
 
     vae_step=0
     ldp_step=0
@@ -357,8 +423,8 @@ status() {
     eval_state=no
     if [[ -s "$eval" ]]; then
       if eval_result_valid "$index" "$eval"; then
-        phase=complete
-        eval_state=valid
+        phase=eval_result_pending_audit
+        eval_state=candidate
       else
         phase=invalid_eval
         eval_state=invalid
@@ -395,6 +461,7 @@ status() {
 }
 
 audit_completion() {
+  require_formal_eval_contract
   if [[ ! -x "$PYTHON_BIN" ]]; then
     echo "Python environment not found: $PYTHON_BIN" >&2
     exit 2
@@ -405,7 +472,7 @@ audit_completion() {
       --dataset-root "$DATASET_ROOT" \
       --artifact-root "$ARTIFACT_ROOT" \
       --label "$CORE_LABEL" \
-      --seed "$SEED" --episodes "$EPISODES" --eval-seed "$EVAL_SEED" \
+      --seed "$SEED" --episodes "$FORMAL_EPISODES" --eval-seed "$EVAL_SEED" \
       --output "$COMPLETION_AUDIT_OUTPUT"
 }
 

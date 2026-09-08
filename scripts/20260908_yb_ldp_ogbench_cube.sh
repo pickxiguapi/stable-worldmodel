@@ -49,6 +49,7 @@ EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 ALLOW_NONSTANDARD_HORIZON=${ALLOW_NONSTANDARD_HORIZON:-0}
+ALLOW_PARTIAL_LATENTS=${ALLOW_PARTIAL_LATENTS:-0}
 DEFAULT_ENV_ID=${DATASET_ID/-play/}
 DEFAULT_ENV_ID=${DEFAULT_ENV_ID/-noisy/}
 ENV_ID=${ENV_ID:-$DEFAULT_ENV_ID}
@@ -140,6 +141,31 @@ require_python() {
   if [[ "$actual" != "$expected" ]]; then
     echo "LDP dependency overlay spec mismatch: expected $expected, found $actual" >&2
     exit 4
+  fi
+}
+
+require_formal_contract() {
+  local normalized_task_ids
+  local -a requested_task_ids=()
+  read -r -a requested_task_ids <<< "$EVAL_TASK_IDS"
+  normalized_task_ids="${requested_task_ids[*]}"
+  local mismatches=()
+  [[ "$VAE_STEPS" == 300000 ]] || mismatches+=("VAE_STEPS=$VAE_STEPS")
+  [[ "$VAE_BATCH_SIZE" == 128 ]] || mismatches+=("VAE_BATCH_SIZE=$VAE_BATCH_SIZE")
+  [[ "$LDP_STEPS" == 500000 ]] || mismatches+=("LDP_STEPS=$LDP_STEPS")
+  [[ "$LDP_BATCH_SIZE" == 128 ]] || mismatches+=("LDP_BATCH_SIZE=$LDP_BATCH_SIZE")
+  [[ "$PRED_HORIZON" == 8 ]] || mismatches+=("PRED_HORIZON=$PRED_HORIZON")
+  [[ "$ACTION_HORIZON" == 4 ]] || mismatches+=("ACTION_HORIZON=$ACTION_HORIZON")
+  [[ "$DIFFUSION_STEPS" == 100 ]] || mismatches+=("DIFFUSION_STEPS=$DIFFUSION_STEPS")
+  [[ "$EPISODES" == 10 ]] || mismatches+=("EPISODES=$EPISODES")
+  [[ "$normalized_task_ids" == '1 2 3 4 5' ]] || mismatches+=("EVAL_TASK_IDS=$normalized_task_ids")
+  [[ -z "$MAX_EPISODE_STEPS" ]] || mismatches+=("MAX_EPISODE_STEPS=$MAX_EPISODE_STEPS")
+  [[ "$ALLOW_NONSTANDARD_HORIZON" == 0 ]] || mismatches+=("ALLOW_NONSTANDARD_HORIZON=$ALLOW_NONSTANDARD_HORIZON")
+  [[ -z ${MAX_ENCODE_EPISODES:-} ]] || mismatches+=("MAX_ENCODE_EPISODES=${MAX_ENCODE_EPISODES}")
+  [[ "$ALLOW_PARTIAL_LATENTS" == 0 ]] || mismatches+=("ALLOW_PARTIAL_LATENTS=$ALLOW_PARTIAL_LATENTS")
+  if (( ${#mismatches[@]} )); then
+    echo "Formal pipeline contract mismatch: ${mismatches[*]}" >&2
+    exit 2
   fi
 }
 
@@ -244,7 +270,8 @@ unit_test() {
     exit 2
   fi
   cd "$STABLEWM_ROOT"
-  "$TEST_PYTHON_BIN" -m pytest -q tests/test_ldp_ogbench_data.py
+  "$TEST_PYTHON_BIN" -m pytest -q \
+    tests/test_ldp_ogbench_data.py tests/test_ldp_ogbench_resume.py
   "$TEST_PYTHON_BIN" -m py_compile \
     scripts/data/ldp_ogbench_data.py scripts/train/ldp_ogbench.py
 }
@@ -318,8 +345,12 @@ train_ldp() {
   cd "$STABLEWM_ROOT"
   export CUDA_VISIBLE_DEVICES="$GPU_ID"
   local resume_args=()
+  local partial_args=()
   if [[ "$RESUME" == 1 ]]; then
     resume_args=(--resume)
+  fi
+  if [[ "$ALLOW_PARTIAL_LATENTS" == 1 ]]; then
+    partial_args=(--allow-partial-latents)
   fi
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py train-ldp \
     --source "$SOURCE_DATASET" --latents "$LATENT_FILE" \
@@ -327,7 +358,8 @@ train_ldp() {
     --batch-size "$LDP_BATCH_SIZE" --pred-horizon "$PRED_HORIZON" \
     --action-horizon "$ACTION_HORIZON" --diffusion-steps "$DIFFUSION_STEPS" \
     --seed "$SEED" --log-every "$LDP_LOG_EVERY" --save-every "$LDP_SAVE_EVERY" \
-    --validation-batches "$LDP_VALIDATION_BATCHES" "${resume_args[@]}"
+    --validation-batches "$LDP_VALIDATION_BATCHES" \
+    "${resume_args[@]}" "${partial_args[@]}"
 }
 
 run_eval() {
@@ -368,6 +400,7 @@ audit_environment() {
 }
 
 pipeline() {
+  require_formal_contract
   audit_data
   unit_test
   train_vae
@@ -388,6 +421,7 @@ smoke() {
     VAE_STEPS=2 VAE_BATCH_SIZE=2 VAE_LOG_EVERY=1 VAE_SAVE_EVERY=2 \
     ENCODE_BATCH_SIZE=64 MAX_ENCODE_EPISODES=40 MAX_VAE_VALIDATION_MSE=1.0 \
     LDP_STEPS=2 LDP_BATCH_SIZE=2 LDP_LOG_EVERY=1 LDP_SAVE_EVERY=2 \
+    ALLOW_PARTIAL_LATENTS=1 \
     EPISODES=1 EVAL_TASK_IDS='1 2 3 4 5' MAX_EPISODE_STEPS=1 \
     ALLOW_NONSTANDARD_HORIZON=1 pipeline_smoke
   echo "SMOKE_COMPLETE=$smoke_root"
@@ -416,7 +450,7 @@ launch() {
     exit 4
   fi
   tmux new-session -d -s "$session" \
-    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' DATASET_ROOT='$DATASET_ROOT' DATASET_ID='$DATASET_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' TASK_TAG='$TASK_TAG' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' VAE_LOG_EVERY='$VAE_LOG_EVERY' VAE_SAVE_EVERY='$VAE_SAVE_EVERY' ENCODE_BATCH_SIZE='$ENCODE_BATCH_SIZE' VAE_VALIDATION_SAMPLES='$VAE_VALIDATION_SAMPLES' MAX_VAE_VALIDATION_MSE='$MAX_VAE_VALIDATION_MSE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' LDP_LOG_EVERY='$LDP_LOG_EVERY' LDP_SAVE_EVERY='$LDP_SAVE_EVERY' LDP_VALIDATION_BATCHES='$LDP_VALIDATION_BATCHES' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' ENV_ID='$ENV_ID' EVAL_TASK_IDS='$EVAL_TASK_IDS' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' MAX_EPISODE_STEPS='$MAX_EPISODE_STEPS' RESUME='$RESUME' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
+    "cd '$STABLEWM_ROOT' && MODE=pipeline GPU_ID='$GPU_ID' MIN_FREE_MEMORY_MIB='$MIN_FREE_MEMORY_MIB' DATASET_ROOT='$DATASET_ROOT' DATASET_ID='$DATASET_ID' SOURCE_DATASET='$SOURCE_DATASET' ARTIFACT_ROOT='$ARTIFACT_ROOT' TASK_TAG='$TASK_TAG' RUN_LABEL='$RUN_LABEL' SEED='$SEED' VAE_STEPS='$VAE_STEPS' VAE_BATCH_SIZE='$VAE_BATCH_SIZE' VAE_LOG_EVERY='$VAE_LOG_EVERY' VAE_SAVE_EVERY='$VAE_SAVE_EVERY' ENCODE_BATCH_SIZE='$ENCODE_BATCH_SIZE' MAX_ENCODE_EPISODES='' ALLOW_PARTIAL_LATENTS='0' VAE_VALIDATION_SAMPLES='$VAE_VALIDATION_SAMPLES' MAX_VAE_VALIDATION_MSE='$MAX_VAE_VALIDATION_MSE' LDP_STEPS='$LDP_STEPS' LDP_BATCH_SIZE='$LDP_BATCH_SIZE' LDP_LOG_EVERY='$LDP_LOG_EVERY' LDP_SAVE_EVERY='$LDP_SAVE_EVERY' LDP_VALIDATION_BATCHES='$LDP_VALIDATION_BATCHES' PRED_HORIZON='$PRED_HORIZON' ACTION_HORIZON='$ACTION_HORIZON' DIFFUSION_STEPS='$DIFFUSION_STEPS' ENV_ID='$ENV_ID' EVAL_TASK_IDS='$EVAL_TASK_IDS' EPISODES='$EPISODES' EVAL_SEED='$EVAL_SEED' MAX_EPISODE_STEPS='' ALLOW_NONSTANDARD_HORIZON='0' RESUME='$RESUME' bash '$STABLEWM_ROOT/scripts/20260908_yb_ldp_ogbench_cube.sh' 2>&1 | tee '$ARTIFACT_ROOT/${RUN_NAME}.log'"
   echo "LAUNCHED session=$session gpu=$GPU_ID log=$ARTIFACT_ROOT/${RUN_NAME}.log"
 }
 
