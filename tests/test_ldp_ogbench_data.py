@@ -105,6 +105,33 @@ def test_partial_latents_must_end_on_episode_boundary(tmp_path):
         OGBenchLDPData(source, partial_latent)
 
 
+def test_train_split_is_aligned_to_original_source_episode(tmp_path):
+    source = tmp_path / 'source.h5'
+    latent = tmp_path / 'latent.h5'
+    make_data(source, latent)
+    with h5py.File(source, 'r+') as handle:
+        handle.create_dataset(
+            'source_episode',
+            data=np.repeat(np.array([10, 11, 12], dtype=np.int32), 6),
+        )
+    with h5py.File(latent, 'r+') as handle:
+        handle.attrs['source_size_bytes'] = source.stat().st_size
+    data = OGBenchLDPData(source, latent, train_fraction=0.8)
+    assert data.train_episodes == 2
+    assert data.training_episode_count(2, train_fraction=0.95) == 1
+
+
+def test_terminal_rows_must_match_episode_metadata(tmp_path):
+    source = tmp_path / 'source.h5'
+    latent = tmp_path / 'latent.h5'
+    make_data(source, latent)
+    with h5py.File(source, 'r+') as handle:
+        handle['terminal'][5] = False
+        handle['terminal'][4] = True
+    with np.testing.assert_raises_regex(ValueError, 'terminal rows disagree'):
+        OGBenchLDPData(source, latent)
+
+
 def test_task_goal_residual_uses_generic_official_reward():
     class FakeEnv:
         unwrapped = None

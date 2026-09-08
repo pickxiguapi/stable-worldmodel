@@ -149,6 +149,15 @@ audit_environments() {
   echo "ENV_AUDIT_MATRIX_COMPLETE=8"
 }
 
+audit_loaders() {
+  local index
+  for index in "${!dataset_ids[@]}"; do
+    echo "LOADER_AUDIT index=$index dataset=${dataset_ids[$index]}"
+    run_base "$index" audit-loader
+  done
+  echo "LOADER_AUDIT_MATRIX_COMPLETE=8"
+}
+
 smoke_one() {
   : "${TASK_INDEX:?TASK_INDEX is required for MODE=smoke-one}"
   validate_index "$TASK_INDEX"
@@ -341,6 +350,7 @@ case "$MODE" in
   plan) plan ;;
   audit) audit_all ;;
   audit-environments) audit_environments ;;
+  audit-loaders) audit_loaders ;;
   smoke-one) smoke_one ;;
   smoke-missing) smoke_missing ;;
   launch-one) launch_one ;;

@@ -261,6 +261,17 @@ audit_data() {
   "$PYTHON_BIN" scripts/train/ldp_ogbench.py audit --source "$SOURCE_DATASET"
 }
 
+audit_loader() {
+  require_python
+  check_upstream
+  if [[ ! -f "$SOURCE_DATASET" ]]; then
+    echo "Missing source dataset: $SOURCE_DATASET" >&2
+    exit 2
+  fi
+  cd "$STABLEWM_ROOT"
+  "$PYTHON_BIN" scripts/train/ldp_ogbench.py audit --source "$SOURCE_DATASET"
+}
+
 train_vae() {
   require_python
   check_upstream
@@ -422,6 +433,7 @@ case "$MODE" in
   env-witness) env_witness ;;
   test) unit_test ;;
   audit-data|data-test) audit_data ;;
+  audit-loader) audit_loader ;;
   train-vae) train_vae ;;
   encode) encode_data ;;
   train-ldp) train_ldp ;;
