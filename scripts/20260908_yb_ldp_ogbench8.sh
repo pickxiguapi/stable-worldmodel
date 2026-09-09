@@ -35,17 +35,17 @@ LDP_VALIDATION_BATCHES=${LDP_VALIDATION_BATCHES:-4}
 PRED_HORIZON=${PRED_HORIZON:-8}
 ACTION_HORIZON=${ACTION_HORIZON:-4}
 DIFFUSION_STEPS=${DIFFUSION_STEPS:-100}
-EPISODES=${EPISODES:-10}
+EPISODES=${EPISODES:-50}
 EVAL_SEED=${EVAL_SEED:-42}
 EVAL_TASK_IDS=${EVAL_TASK_IDS:-1 2 3 4 5}
 MAX_EPISODE_STEPS=${MAX_EPISODE_STEPS:-}
 ALLOW_NONSTANDARD_HORIZON=${ALLOW_NONSTANDARD_HORIZON:-0}
-FORMAL_EPISODES=10
+FORMAL_EPISODES=50
 FORMAL_TASK_IDS='1 2 3 4 5'
 MIN_FREE_MEMORY_MIB=${MIN_FREE_MEMORY_MIB:-17000}
 MIN_FREE_DISK_GIB=${MIN_FREE_DISK_GIB:-32}
 XLA_PYTHON_CLIENT_MEM_FRACTION=${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.18}
-COMPLETION_AUDIT_OUTPUT=${COMPLETION_AUDIT_OUTPUT:-$ARTIFACT_ROOT/audits/ldp_ogbench8_completion.json}
+COMPLETION_AUDIT_OUTPUT=${COMPLETION_AUDIT_OUTPUT:-$ARTIFACT_ROOT/audits/ldp_ogbench8_completion_eval${FORMAL_EPISODES}_s${EVAL_SEED}.json}
 
 dataset_ids=(
   visual-cube-single-play-v0
@@ -283,9 +283,9 @@ launch_eval_ready() {
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     formal_session="ldp_${name:0:70}"
-    eval_session="ldp_eval_${name:0:65}"
+    eval_session="ldp_eval${FORMAL_EPISODES}_${name:0:60}"
     formal_log="$ARTIFACT_ROOT/$name.log"
-    eval_log="$ARTIFACT_ROOT/${name}_official_eval.log"
+    eval_log="$ARTIFACT_ROOT/${name}_official_eval${FORMAL_EPISODES}_s${EVAL_SEED}.log"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
     ldp_config="$ARTIFACT_ROOT/runs/${name}_ldp/config.json"
     ldp_state="$ARTIFACT_ROOT/runs/${name}_ldp/resume_state.json"
@@ -380,9 +380,9 @@ status() {
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     session="ldp_${name:0:70}"
-    eval_session="ldp_eval_${name:0:65}"
+    eval_session="ldp_eval${FORMAL_EPISODES}_${name:0:60}"
     log="$ARTIFACT_ROOT/$name.log"
-    eval_log="$ARTIFACT_ROOT/${name}_official_eval.log"
+    eval_log="$ARTIFACT_ROOT/${name}_official_eval${FORMAL_EPISODES}_s${EVAL_SEED}.log"
     vae="$ARTIFACT_ROOT/runs/${name}_vae/checkpoint.msgpack"
     latent="$ARTIFACT_ROOT/data/${name}_latents.h5"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"

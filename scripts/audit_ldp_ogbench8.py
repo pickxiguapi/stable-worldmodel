@@ -20,7 +20,7 @@ import numpy as np
 
 UPSTREAM_COMMIT = 'a26cbf1d2c0aec7adc5d9746f47831b162a41c0c'
 OGBENCH_COMMIT = '1d4140997f60c52c6fb0702ec100dc988b18c548'
-EXPECTED_EPISODES_PER_TASK = 10
+EXPECTED_EPISODES_PER_TASK = 50
 GOAL_CONDITIONING = 'planner_global_condition_current_plus_final_goal'
 IDM_CONDITIONING = 'adjacent_latent_transition_only'
 ANOMALY_PATTERN = re.compile(
@@ -458,7 +458,7 @@ def audit_task(
     ldp_dir = artifact_root / 'runs' / f'{name}_ldp'
     eval_path = artifact_root / 'evals' / f'{name}_eval{episodes}_s{eval_seed}' / 'results.json'
     log_path = artifact_root / f'{name}.log'
-    eval_log_path = artifact_root / f'{name}_official_eval.log'
+    eval_log_path = artifact_root / f'{name}_official_eval{episodes}_s{eval_seed}.log'
     audit.evidence.update(
         run=name,
         dataset=str(source_path),
