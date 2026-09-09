@@ -134,6 +134,30 @@ run_name() {
   printf 'ldp_%s_%s_s%s\n' "${task_tags[$index]}" "$CORE_LABEL" "$SEED"
 }
 
+eval_session_name() {
+  local name=$1
+  printf 'ldp_eval%s_s%s_%s\n' "$FORMAL_EPISODES" "$EVAL_SEED" "${name:0:56}"
+}
+
+running_eval_session() {
+  local name=$1
+  local session legacy_session
+  session=$(eval_session_name "$name")
+  if tmux has-session -t "$session" 2>/dev/null; then
+    printf '%s\n' "$session"
+    return 0
+  fi
+  # Seed 42 was launched before eval seeds were included in session names.
+  if [[ "$EVAL_SEED" == 42 ]]; then
+    legacy_session="ldp_eval${FORMAL_EPISODES}_${name:0:60}"
+    if tmux has-session -t "$legacy_session" 2>/dev/null; then
+      printf '%s\n' "$legacy_session"
+      return 0
+    fi
+  fi
+  return 1
+}
+
 run_base() {
   local index=$1
   local child_mode=$2
@@ -278,12 +302,14 @@ eval_result_fully_valid() {
 
 launch_eval_ready() {
   require_formal_eval_contract
-  local index name formal_session eval_session formal_log eval_log ldp ldp_config ldp_state eval
+  local index name formal_session eval_session active_eval_session
+  local formal_log eval_log ldp ldp_config ldp_state eval
   local eval_dir quarantine
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     formal_session="ldp_${name:0:70}"
-    eval_session="ldp_eval${FORMAL_EPISODES}_${name:0:60}"
+    eval_session=$(eval_session_name "$name")
+    active_eval_session=$(running_eval_session "$name" || true)
     formal_log="$ARTIFACT_ROOT/$name.log"
     eval_log="$ARTIFACT_ROOT/${name}_official_eval${FORMAL_EPISODES}_s${EVAL_SEED}.log"
     ldp="$ARTIFACT_ROOT/runs/${name}_ldp/checkpoint.msgpack"
@@ -300,8 +326,8 @@ launch_eval_ready() {
         echo "EVAL_INVALID_WAIT_FORMAL index=$index result=$eval" >&2
         continue
       fi
-      if tmux has-session -t "$eval_session" 2>/dev/null; then
-        echo "EVAL_INVALID_WAIT_EVAL_SESSION index=$index result=$eval" >&2
+      if [[ -n "$active_eval_session" ]]; then
+        echo "EVAL_INVALID_WAIT_EVAL_SESSION index=$index result=$eval session=$active_eval_session" >&2
         continue
       fi
       quarantine="${eval_dir}_invalid_$(date +%Y%m%dT%H%M%S)"
@@ -312,8 +338,8 @@ launch_eval_ready() {
       echo "EVAL_WAIT_FORMAL index=$index session=$formal_session"
       continue
     fi
-    if tmux has-session -t "$eval_session" 2>/dev/null; then
-      echo "EVAL_ALREADY_RUNNING index=$index session=$eval_session"
+    if [[ -n "$active_eval_session" ]]; then
+      echo "EVAL_ALREADY_RUNNING index=$index session=$active_eval_session"
       continue
     fi
     if [[ -d "$eval_dir" && ! -s "$eval" ]]; then
@@ -358,7 +384,7 @@ else:
 }
 
 status() {
-  local index name session eval_session log eval_log vae latent ldp eval
+  local index name session eval_session active_eval_session log eval_log vae latent ldp eval
   local phase session_state eval_session_state vae_step ldp_step anomalies eval_state
   local progress metric_age_s steps_per_s eta_h
   local disk_available_kib disk_available_gib disk_state
@@ -380,7 +406,8 @@ status() {
   for index in "${!dataset_ids[@]}"; do
     name=$(run_name "$index")
     session="ldp_${name:0:70}"
-    eval_session="ldp_eval${FORMAL_EPISODES}_${name:0:60}"
+    eval_session=$(eval_session_name "$name")
+    active_eval_session=$(running_eval_session "$name" || true)
     log="$ARTIFACT_ROOT/$name.log"
     eval_log="$ARTIFACT_ROOT/${name}_official_eval${FORMAL_EPISODES}_s${EVAL_SEED}.log"
     vae="$ARTIFACT_ROOT/runs/${name}_vae/checkpoint.msgpack"
@@ -435,7 +462,7 @@ status() {
     else
       session_state=missing
     fi
-    if tmux has-session -t "$eval_session" 2>/dev/null; then
+    if [[ -n "$active_eval_session" ]]; then
       eval_session_state=live
     else
       eval_session_state=missing
